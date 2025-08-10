@@ -2,7 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from decimal import Decimal
-
+from sqlalchemy import func
 from db import get_db
 from auth import get_current_user
 from models import Gasto
@@ -65,3 +65,44 @@ def borrar_gasto(gid: int, db: Session = Depends(get_db)):
     db.delete(g)
     db.commit()
     return {"ok": True}
+
+def _to_float(x):
+    try:
+        return float(x or 0)
+    except Exception:
+        return 0.0
+
+@router.get("/resumen", dependencies=[Depends(get_current_user)])
+def resumen_gastos(mes: int, anio: int, db: Session = Depends(get_db)):
+    # Total del mes
+    total_mes = db.query(func.coalesce(func.sum(Gasto.monto), 0)) \
+                  .filter(Gasto.anio == anio, Gasto.mes == mes).scalar()
+
+    # Total pagado y pendiente del mes
+    total_pagado = db.query(func.coalesce(func.sum(Gasto.monto), 0)) \
+                     .filter(Gasto.anio == anio, Gasto.mes == mes, Gasto.pagado == True).scalar()
+    total_pendiente = db.query(func.coalesce(func.sum(Gasto.monto), 0)) \
+                        .filter(Gasto.anio == anio, Gasto.mes == mes, Gasto.pagado == False).scalar()
+
+    # Total anual (para referencia rápida)
+    total_anio = db.query(func.coalesce(func.sum(Gasto.monto), 0)) \
+                   .filter(Gasto.anio == anio).scalar()
+
+    total_mes = _to_float(total_mes)
+    total_pagado = _to_float(total_pagado)
+    total_pendiente = _to_float(total_pendiente)
+    total_anio = _to_float(total_anio)
+
+    pct_pagado = 0.0
+    if total_mes > 0:
+        pct_pagado = round((total_pagado / total_mes) * 100, 1)
+
+    return {
+        "mes": mes,
+        "anio": anio,
+        "total_mes": total_mes,
+        "total_pagado": total_pagado,
+        "total_pendiente": total_pendiente,
+        "total_anio": total_anio,
+        "pct_pagado": pct_pagado,
+    }

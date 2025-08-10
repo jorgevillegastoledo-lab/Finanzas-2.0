@@ -1,2 +1,3 @@
 backend/.env
 frontend/.env
+backend/__pycache__/gastos.cpython-313.pyc
