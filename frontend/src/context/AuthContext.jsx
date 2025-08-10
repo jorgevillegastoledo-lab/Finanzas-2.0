@@ -2,69 +2,59 @@
 import React, { createContext, useEffect, useState } from "react";
 import api from "../api/api";
 
-// Context que podrás usar con useContext(AuthContext)
+// Contexto que podrás usar con useContext(AuthContext)
 export const AuthContext = createContext();
 
-export default function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);     // { email }
+// Exportación **con nombre** (named) que espera App.jsx
+export function AuthProvider({ children }) {
+  const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Al montar la app, restaurar sesión si hay token+user en localStorage
+  // Restaura sesión desde localStorage al montar
   useEffect(() => {
     const token = localStorage.getItem("token");
-    const storedUser = localStorage.getItem("user");
-    if (token && storedUser) {
+    const stored = localStorage.getItem("user");
+    if (token && stored) {
       try {
-        const u = JSON.parse(storedUser);
-        setUser(u); // { email }
+        setUser(JSON.parse(stored));
       } catch {
-        // si falla el parse, limpiamos
         localStorage.removeItem("user");
       }
     }
     setLoading(false);
   }, []);
 
-  /**
-   * Iniciar sesión.
-   * Devuelve true si OK, false si fallo (credenciales inválidas, etc.).
-   */
+  // Login: pide token al backend y guarda sesión
   const login = async (email, password) => {
     try {
-      // Opción JSON (coincide con tu backend /auth/login-json)
       const { data } = await api.post("/auth/login-json", { email, password });
+      const token = data.access_token;
 
-      // Guardar token y usuario
-      localStorage.setItem("token", data.access_token);   // ⚠ la clave "token" es la que usa tu api.js
+      localStorage.setItem("token", token);
       localStorage.setItem("user", JSON.stringify({ email }));
-
-      // (opcional) setear el header de axios para esta sesión inmediata
-      api.defaults.headers.common.Authorization = `Bearer ${data.access_token}`;
 
       setUser({ email });
       return true;
     } catch (err) {
-      console.error("Error en login:", err?.response?.data || err.message);
+      console.error("Error en login:", err);
       return false;
     }
   };
 
-  /**
-   * Cerrar sesión: limpia storage y estado
-   */
+  // Logout: limpia sesión
   const logout = () => {
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     setUser(null);
   };
 
-  const value = {
-    user,
-    loading,
-    isAuthenticated: !!user,
-    login,
-    logout,
-  };
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  return (
+    <AuthContext.Provider value={{ user, loading, login, logout }}>
+      {/* Evita parpadear mientras restaura sesión */}
+      {!loading && children}
+    </AuthContext.Provider>
+  );
 }
+
+// (Opcional) también exporto por defecto, por si lo necesitas
+export default AuthProvider;
