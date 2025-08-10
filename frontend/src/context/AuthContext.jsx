@@ -1,18 +1,45 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import { getToken, setToken as saveToken, clearToken } from "../api/token";
+import React, { createContext, useState, useEffect } from "react";
+import api from "../api/api";
 
-const AuthContext = createContext();
+export const AuthContext = createContext();
 
-export function AuthProvider({ children }) {
-  const [token, setToken] = useState(getToken());
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => { token ? saveToken(token) : clearToken(); }, [token]);
-  const logout = () => setToken(null);
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    const storedUser = localStorage.getItem("user");
+    if (token && storedUser) {
+      setUser(JSON.parse(storedUser));
+    }
+    setLoading(false);
+  }, []);
+
+const login = async (email, password) => {
+  try {
+    const { data } = await api.post("/auth/login-json", { email, password });
+    const token = data.access_token;
+    localStorage.setItem("token", token);
+    localStorage.setItem("user", JSON.stringify({ email }));
+    setUser({ email });
+    return true;                // <- importante
+  } catch (err) {
+    console.error("Error en login", err);
+    return false;               // <- importante
+  }
+};
+
+
+  const logout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    setUser(null);
+  };
 
   return (
-    <AuthContext.Provider value={{ token, setToken, logout }}>
+    <AuthContext.Provider value={{ user, login, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
-}
-export const useAuth = () => useContext(AuthContext);
+};

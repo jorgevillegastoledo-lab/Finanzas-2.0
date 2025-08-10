@@ -1,43 +1,50 @@
+# backend/app.py
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy import text
 
-from db import Base, engine, get_db
-import models
-import crud
-import schemas
-from auth import router as auth_router, get_current_user, User
+from db import Base, engine, SessionLocal
+from auth import router as auth_router, get_current_user
+from gastos import router as gastos_router  # <-- nuevo
 
-# Crea tablas (incluye users/usuarios)
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI(title="Finanzas 2.0 - Backend")
+app = FastAPI(title="Finanzas 2.0 - Backend", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Rutas de autenticación
+# crea tablas (users, gastos, etc.)
+Base.metadata.create_all(bind=engine)
+
+# Routers
 app.include_router(auth_router)
+app.include_router(gastos_router)
 
 @app.get("/")
 def raiz():
-    return {"mensaje": "API funcionando correctamente"}
+    return {"ok": True, "api": "Finanzas 2.0"}
 
 @app.get("/me")
-def me(current: User = Depends(get_current_user)):
-    return {"id": current.id, "email": current.email}
+def me(user = Depends(get_current_user)):
+    return {"id": user.id, "email": user.email}
 
-# ---- Endpoints de ejemplo protegidos (usuarios demo) ----
-@app.post("/usuarios", response_model=schemas.UsuarioOut)
-def crear_usuario(usuario: schemas.UsuarioCreate, db: Session = Depends(get_db), current: User = Depends(get_current_user)):
-    return crud.crear_usuario(db, usuario)
-
-@app.get("/usuarios", response_model=list[schemas.UsuarioOut])
-def listar_usuarios(db: Session = Depends(get_db), current: User = Depends(get_current_user)):
-    return crud.listar_usuarios(db)
+# Diagnóstico opcional
+@app.get("/diag/db")
+def diag_db():
+    db = SessionLocal()
+    try:
+        ver = db.execute(text("SELECT version()")).scalar()
+        tablas = db.execute(text("""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema='public'
+            ORDER BY table_name
+        """)).fetchall()
+        return {"ok": True, "version": ver, "tablas": [t[0] for t in tablas]}
+    finally:
+        db.close()
 
