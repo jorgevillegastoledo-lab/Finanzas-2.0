@@ -6,6 +6,7 @@ from sqlalchemy import text
 from db import Base, engine, SessionLocal
 from auth import router as auth_router, get_current_user
 from gastos import router as gastos_router  # <-- nuevo
+from prestamos import router as prestamos_router
 
 app = FastAPI(title="Finanzas 2.0 - Backend", version="0.1.0")
 
@@ -23,6 +24,7 @@ Base.metadata.create_all(bind=engine)
 # Routers
 app.include_router(auth_router)
 app.include_router(gastos_router)
+app.include_router(prestamos_router)
 
 @app.get("/")
 def raiz():
