@@ -32,31 +32,14 @@ export default function Gastos() {
   });
   const meses = [
     "",
-    "Enero",
-    "Febrero",
-    "Marzo",
-    "Abril",
-    "Mayo",
-    "Junio",
-    "Julio",
-    "Agosto",
-    "Septiembre",
-    "Octubre",
-    "Noviembre",
-    "Diciembre",
+    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre",
   ];
 
   const calcularTotales = (items) => {
-    const totalMes =
-      fMes !== ""
-        ? items.reduce((acc, g) => acc + (Number(g.monto) || 0), 0)
-        : null;
-
-    const totalAnio =
-      fAnio !== ""
-        ? items.reduce((acc, g) => acc + (Number(g.monto) || 0), 0)
-        : null;
-
+    const base = fPagado ? items.filter((g) => !!g.pagado) : items;
+    const totalMes  = fMes  !== "" ? base.reduce((a, g) => a + (Number(g.monto) || 0), 0) : null;
+    const totalAnio = fAnio !== "" ? base.reduce((a, g) => a + (Number(g.monto) || 0), 0) : null;
     setTotales({ mes: totalMes, anio: totalAnio });
   };
 
@@ -65,34 +48,45 @@ export default function Gastos() {
       setErrorG("");
       setLoadingG(true);
 
+      // ⚠️ Con el backend nuevo, si no hay MES y AÑO juntos, NO llamamos a la API
+      if (!fMes || !fAnio) {
+        setGastos([]);
+        setTotales({ mes: null, anio: null });
+        return;
+      }
+
       const { data } = await api.get("/gastos", {
         params: {
-          mes: fMes || undefined,
-          anio: fAnio || undefined,
-          pagado: fPagado ? true : undefined,
+          mes: Number(fMes),
+          anio: Number(fAnio),
+          // el backend actual no usa 'pagado' como query;
+          // si quieres filtrar, lo hacemos client-side:
+          // pagado: fPagado ? true : undefined,
         },
       });
 
-      const items = Array.isArray(data) ? data : data.items ?? [];
-      setGastos(items);
+      // El backend ahora responde { ok: true, data: [...] }
+      const itemsRaw = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
+      const items = fPagado ? itemsRaw.filter((g) => !!g.pagado) : itemsRaw;
 
+      setGastos(items);
       if (data?.totales && (data.totales.mes !== undefined || data.totales.anio !== undefined)) {
-        setTotales({
-          mes: data.totales.mes ?? null,
-          anio: data.totales.anio ?? null,
-        });
+        setTotales({ mes: data.totales.mes ?? null, anio: data.totales.anio ?? null });
       } else {
         calcularTotales(items);
       }
     } catch (err) {
-      setErrorG(err?.response?.data?.detail || "No pude cargar gastos");
+      // Si por error se llamó sin params, el backend devuelve 422; mostramos mensaje simple
+      const msg = err?.response?.data?.detail || "No pude cargar gastos";
+      setErrorG(msg);
     } finally {
       setLoadingG(false);
     }
   };
 
   useEffect(() => {
-    loadGastos();
+    // Al montar ya no llamamos si no hay filtros; dejamos la página vacía
+    setLoadingG(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -120,6 +114,7 @@ export default function Gastos() {
         anio: form.anio ? Number(form.anio) : null,
         pagado: Boolean(form.pagado),
       };
+
       if (editingId) {
         await api.put(`/gastos/${editingId}`, payload);
       } else {
@@ -210,11 +205,7 @@ export default function Gastos() {
           </label>
           <div style={{ display: "flex", gap: 10 }}>
             <button type="submit" disabled={busy} style={ui.btn}>
-              {busy
-                ? "Guardando..."
-                : editingId
-                ? "Guardar cambios"
-                : "Guardar"}
+              {busy ? "Guardando..." : editingId ? "Guardar cambios" : "Guardar"}
             </button>
             {editingId && (
               <button
@@ -233,24 +224,11 @@ export default function Gastos() {
       {/* Filtros + totales */}
       <div style={ui.card}>
         <div style={styles.cardTitle}>Filtros</div>
-        <div
-          style={{
-            display: "flex",
-            gap: 10,
-            alignItems: "center",
-            marginBottom: 12,
-          }}
-        >
-          <select
-            value={fMes}
-            onChange={(e) => setFMes(e.target.value)}
-            style={styles.input}
-          >
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+          <select value={fMes} onChange={(e) => setFMes(e.target.value)} style={styles.input}>
             <option value="">Mes (todos)</option>
             {[...Array(12)].map((_, i) => (
-              <option key={i + 1} value={i + 1}>
-                {i + 1}
-              </option>
+              <option key={i + 1} value={i + 1}>{i + 1}</option>
             ))}
           </select>
 
@@ -271,16 +249,15 @@ export default function Gastos() {
             Pagado
           </label>
 
-          <button onClick={loadGastos} style={styles.smallBtn}>
-            Aplicar
-          </button>
+          <button onClick={loadGastos} style={styles.smallBtn}>Aplicar</button>
           <button
             onClick={() => {
               setFMes("");
               setFAnio("");
               setFPagado(false);
               setTotales({ mes: null, anio: null });
-              loadGastos();
+              setGastos([]);
+              setErrorG("");
             }}
             style={{ ...styles.smallBtn, background: "#8899aa" }}
           >
@@ -289,16 +266,8 @@ export default function Gastos() {
         </div>
 
         <div style={{ display: "flex", gap: 16, opacity: 0.9 }}>
-          {totales?.mes !== null && (
-            <div>
-              Total mes: <b>{fmt.format(totales.mes)}</b>
-            </div>
-          )}
-          {totales?.anio !== null && (
-            <div>
-              Total año: <b>{fmt.format(totales.anio)}</b>
-            </div>
-          )}
+          {totales?.mes !== null  && <div> Total mes:  <b>{fmt.format(totales.mes)}</b>  </div>}
+          {totales?.anio !== null && <div> Total año: <b>{fmt.format(totales.anio)}</b> </div>}
         </div>
       </div>
 
@@ -309,7 +278,9 @@ export default function Gastos() {
         {errorG && <div style={styles.error}>{errorG}</div>}
         {!loadingG && !errorG && (
           gastos.length === 0 ? (
-            <div style={{ opacity: 0.8 }}>No hay gastos.</div>
+            <div style={{ opacity: 0.8 }}>
+              {(!fMes || !fAnio) ? "Selecciona Mes y Año y presiona Aplicar." : "No hay gastos."}
+            </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
               <table style={styles.table}>
@@ -335,9 +306,7 @@ export default function Gastos() {
                       <td style={styles.td}>{g.pagado ? "Sí" : "No"}</td>
                       <td style={styles.td}>
                         <div style={{ display: "flex", gap: 8 }}>
-                          <button onClick={() => handleEdit(g)} style={styles.smallBtn}>
-                            Editar
-                          </button>
+                          <button onClick={() => handleEdit(g)} style={styles.smallBtn}>Editar</button>
                           <button
                             onClick={() => handleDelete(g.id)}
                             style={{ ...styles.smallBtn, background: "#ff3b30", color: "#fff" }}
