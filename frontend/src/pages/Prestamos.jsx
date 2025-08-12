@@ -1,554 +1,521 @@
 // frontend/src/pages/Prestamos.jsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 
-const fmtCLP = new Intl.NumberFormat("es-CL", {
+const mesesNombres = [
+  "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+];
+
+const fmt = new Intl.NumberFormat("es-CL", {
   style: "currency",
   currency: "CLP",
   maximumFractionDigits: 0,
 });
-const fmtFecha = (iso) =>
-  iso ? new Date(iso).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric" }) : "-";
-
-// Meses (muestra nombre, guarda número)
-const MESES = [
-  { value: 1, label: "Enero" },
-  { value: 2, label: "Febrero" },
-  { value: 3, label: "Marzo" },
-  { value: 4, label: "Abril" },
-  { value: 5, label: "Mayo" },
-  { value: 6, label: "Junio" },
-  { value: 7, label: "Julio" },
-  { value: 8, label: "Agosto" },
-  { value: 9, label: "Septiembre" },
-  { value: 10, label: "Octubre" },
-  { value: 11, label: "Noviembre" },
-  { value: 12, label: "Diciembre" },
-];
-
-// Etiqueta arriba del input
-function Labeled({ label, children }) {
-  return (
-    <label style={styles.labeled}>
-      <div style={styles.labelText}>{label}</div>
-      {children}
-    </label>
-  );
-}
-
-// CSS extra
-const extraCSS = `
-  .btn-pagar { padding:6px 10px; border:0; border-radius:8px; background:#1565c0; color:#fff; font-weight:700; cursor:pointer; }
-  .btn-pagar:hover { background:#1e88e5; }
-  .btn-pagar:disabled { opacity:.6; cursor:not-allowed; }
-  .modal-mask { position:fixed; inset:0; background:rgba(0,0,0,.6); display:flex; align-items:center; justify-content:center; z-index:50; }
-  .modal-card { width:100%; max-width:420px; background:#0e1626; border:1px solid #23304a; border-radius:14px; padding:16px; color:#e6f0ff; }
-  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:12px; }
-`;
 
 export default function Prestamos() {
-  // Lista + resumen
-  const [items, setItems] = useState([]);
-  const [resumen, setResumen] = useState({ total_mes: 0, saldo_total: 0, pagado_total: 0 });
+  const [prestamos, setPrestamos] = useState([]);
+  const [pagos, setPagos] = useState([]); // pagos_prestamo
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // Filtros
-  const [fMes, setFMes] = useState(""); // "" = todos
-  const [fAnio, setFAnio] = useState("");
+  // selección
+  const [seleccionado, setSeleccionado] = useState(null); // objeto préstamo
+  const seleccionadoId = seleccionado?.id ?? null;
 
-  // Form
+  // formulario alta
   const [form, setForm] = useState({
     nombre: "",
     valor_cuota: "",
     cuotas_totales: "",
-    cuotas_pagadas: "0",
     primer_mes: "",
     primer_anio: "",
-    dia_vencimiento: "10",
+    dia_vencimiento: 10,
+    banco: "",
   });
-  const [editingId, setEditingId] = useState(null);
-  const [busy, setBusy] = useState(false);
 
-  // ---- Modal de pago ----
-  const [payOpen, setPayOpen] = useState(false);
-  const [payTarget, setPayTarget] = useState(null); // { id, valor_cuota, nombre }
-  const [payMes, setPayMes] = useState("");
-  const [payAnio, setPayAnio] = useState(String(new Date().getFullYear()));
-  const [payBusy, setPayBusy] = useState(false);
+  // form edición/pago para el seleccionado
+  const [edit, setEdit] = useState({
+    valor_cuota: "",
+    cuotas_totales: "",
+    cuotas_pagadas: "",
+    primer_mes: "",
+    primer_anio: "",
+    dia_vencimiento: "",
+    banco: "",
+  });
+  const [pay, setPay] = useState({ mes: "", anio: "", monto: "" });
 
-  // ---- Detalle del mes (nuevo panel) ----
-  const [detLoading, setDetLoading] = useState(false);
-  const [detErr, setDetErr] = useState("");
-  const [detalleMes, setDetalleMes] = useState([]); // [{...estado, cuota_num, vence_el, fecha_pago}]
-  const [detalleTotalMes, setDetalleTotalMes] = useState(0);
+  const meses = Array.from({ length: 12 }, (_, i) => i + 1);
 
-  const abrirModalPago = (p) => {
-    setPayTarget({ id: p.id, valor_cuota: p.valor_cuota, nombre: p.nombre });
-    setPayMes("");
-    setPayAnio(String(new Date().getFullYear()));
-    setPayOpen(true);
-  };
-  const cerrarModalPago = () => {
-    setPayOpen(false);
-    setPayTarget(null);
-  };
-  const confirmarPago = async () => {
-    if (!payTarget || !payMes || !payAnio) return;
-    setPayBusy(true);
+  // ----------------------------------
+  // Cargar datos
+  // ----------------------------------
+  const loadAll = async () => {
     try {
-      await api.post(`/prestamos/${payTarget.id}/pagar`, {
-        mes_contable: Number(payMes),
-        anio_contable: Number(payAnio),
-      });
-      cerrarModalPago();
-      await load();       // refresca lista/resumen
-      await loadDetalle(); // refresca detalle del mes si hay filtro
-    } catch (e) {
-      alert(e?.response?.data?.detail || "No pude registrar el pago");
-    } finally {
-      setPayBusy(false);
-    }
-  };
-
-  const load = async () => {
-    try {
-      setErr("");
       setLoading(true);
-      const { data } = await api.get("/prestamos", {
-        params: { mes: fMes || undefined, anio: fAnio || undefined },
-      });
-      setItems(data.items || []);
-      setResumen(data.resumen || { total_mes: 0, saldo_total: 0, pagado_total: 0 });
+      setErr("");
+
+      const [pRes, pgRes] = await Promise.all([
+        api.get("/prestamos"),
+        api.get("/pagos_prestamo").catch(() => ({ data: { ok: true, data: [] } })), // tolerante
+      ]);
+
+      const pItems = Array.isArray(pRes.data)
+        ? pRes.data
+        : pRes.data?.data || [];
+
+      const pgItems = Array.isArray(pgRes.data)
+        ? pgRes.data
+        : pgRes.data?.data || [];
+
+      setPrestamos(pItems);
+      setPagos(pgItems);
+
+      // si tengo un seleccionado, refresco su info editable
+      if (seleccionadoId) {
+        const found = pItems.find((x) => x.id === seleccionadoId);
+        if (found) fillEditForm(found);
+      }
     } catch (e) {
-      setErr(e?.response?.data?.detail || "No pude cargar préstamos");
+      setErr(e?.response?.data?.detail || "No pude cargar préstamos.");
     } finally {
       setLoading(false);
     }
   };
 
-  const loadDetalle = async () => {
-    if (!fMes || !fAnio) {
-      setDetalleMes([]);
-      setDetalleTotalMes(0);
-      setDetErr("");
-      return;
-    }
-    try {
-      setDetErr("");
-      setDetLoading(true);
-      const { data } = await api.get("/prestamos/detalle-mensual", {
-        params: { mes: fMes, anio: fAnio },
-      });
-      setDetalleMes(data.items || []);
-      setDetalleTotalMes(data.total_mes || 0);
-    } catch (e) {
-      setDetErr(e?.response?.data?.detail || "No pude cargar el detalle del mes");
-    } finally {
-      setDetLoading(false);
-    }
-  };
-
   useEffect(() => {
-    load();
+    loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const resetForm = () => {
+  // ----------------------------------
+  // Agregados calculados por préstamo
+  // total_pagado, deuda_restante, último pago (mes/año)
+  // ----------------------------------
+  const pagosPorPrestamo = useMemo(() => {
+    const map = new Map();
+    for (const p of pagos) {
+      const key = p.prestamo_id;
+      if (!map.has(key)) {
+        map.set(key, {
+          total_pagado: 0,
+          ultimo_mes: null,
+          ultimo_anio: null,
+        });
+      }
+      const item = map.get(key);
+      item.total_pagado += Number(p.monto_pagado || 0);
+
+      // último pago por (anio, mes)
+      const ma = Number(p.anio_contable || 0);
+      const mm = Number(p.mes_contable || 0);
+      if (
+        item.ultimo_anio == null ||
+        ma > item.ultimo_anio ||
+        (ma === item.ultimo_anio && mm > (item.ultimo_mes || 0))
+      ) {
+        item.ultimo_anio = ma;
+        item.ultimo_mes = mm;
+      }
+    }
+    return map;
+  }, [pagos]);
+
+  const prestamosConTotales = useMemo(() => {
+    return prestamos.map((r) => {
+      const ext = pagosPorPrestamo.get(r.id) || {
+        total_pagado: 0,
+        ultimo_mes: null,
+        ultimo_anio: null,
+      };
+      const valor = Number(r.valor_cuota || 0);
+      const tot = Number(r.cuotas_totales || 0);
+      const totalTeorico = valor * tot;
+      const deuda_restante = Math.max(totalTeorico - ext.total_pagado, 0);
+
+      return {
+        ...r,
+        total_pagado: ext.total_pagado,
+        deuda_restante,
+        ultimo_mes: ext.ultimo_mes,
+        ultimo_anio: ext.ultimo_anio,
+      };
+    });
+  }, [prestamos, pagosPorPrestamo]);
+
+  // ----------------------------------
+  // UI helpers
+  // ----------------------------------
+  const cleanAlta = () => {
     setForm({
       nombre: "",
       valor_cuota: "",
       cuotas_totales: "",
-      cuotas_pagadas: "0",
       primer_mes: "",
       primer_anio: "",
-      dia_vencimiento: "10",
+      dia_vencimiento: 10,
+      banco: "",
     });
-    setEditingId(null);
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!form.nombre || !form.valor_cuota || !form.cuotas_totales || !form.primer_mes || !form.primer_anio) return;
+  const fillEditForm = (p) => {
+    setEdit({
+      valor_cuota: p.valor_cuota || "",
+      cuotas_totales: p.cuotas_totales || "",
+      cuotas_pagadas: p.cuotas_pagadas || 0,
+      primer_mes: p.primer_mes || "",
+      primer_anio: p.primer_anio || "",
+      dia_vencimiento: p.dia_vencimiento || 10,
+      banco: p.banco || "",
+    });
+    // sugerir pago por defecto (mes/año del día)
+    const now = new Date();
+    setPay({
+      mes: now.getMonth() + 1,
+      anio: now.getFullYear(),
+      monto: p.valor_cuota || "",
+    });
+  };
 
-    setBusy(true);
+  const onSelectRow = (r) => {
+    setSeleccionado(r);
+    fillEditForm(r);
+  };
+
+  // ----------------------------------
+  // Acciones
+  // ----------------------------------
+  const guardarNuevo = async () => {
     try {
+      if (!form.nombre || !form.valor_cuota || !form.cuotas_totales) {
+        alert("Nombre, valor de la cuota y cuotas totales son obligatorios.");
+        return;
+      }
       const payload = {
         nombre: form.nombre,
         valor_cuota: Number(form.valor_cuota),
         cuotas_totales: Number(form.cuotas_totales),
-        cuotas_pagadas: Number(form.cuotas_pagadas || 0),
-        primer_mes: Number(form.primer_mes),
-        primer_anio: Number(form.primer_anio),
-        dia_vencimiento: Number(form.dia_vencimiento || 10),
+        primer_mes: form.primer_mes ? Number(form.primer_mes) : null,
+        primer_anio: form.primer_anio ? Number(form.primer_anio) : null,
+        dia_vencimiento: form.dia_vencimiento
+          ? Number(form.dia_vencimiento)
+          : 10,
+        banco: form.banco || null,
       };
-
-      if (editingId) await api.put(`/prestamos/${editingId}`, payload);
-      else await api.post("/prestamos", payload);
-
-      resetForm();
-      await load();
-      await loadDetalle();
+      await api.post("/prestamos", payload);
+      cleanAlta();
+      await loadAll();
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar el préstamo");
-    } finally {
-      setBusy(false);
+      alert(e?.response?.data?.detail || "No pude guardar el préstamo.");
     }
   };
 
-  const handleEdit = (p) => {
-    setEditingId(p.id);
-    setForm({
-      nombre: p.nombre,
-      valor_cuota: String(p.valor_cuota),
-      cuotas_totales: String(p.cuotas_totales),
-      cuotas_pagadas: String(p.cuotas_pagadas ?? 0),
-      primer_mes: String(p.primer_mes),
-      primer_anio: String(p.primer_anio),
-      dia_vencimiento: String(p.dia_vencimiento ?? 10),
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
-  const handleDelete = async (id) => {
-    if (!confirm("¿Eliminar este préstamo?")) return;
+  const guardarEdicion = async () => {
     try {
-      await api.delete(`/prestamos/${id}`);
-      await load();
-      await loadDetalle();
+      if (!seleccionadoId) return;
+      const payload = {
+        nombre: seleccionado.nombre, // si quieres permitir editar nombre, añade un input
+        valor_cuota: Number(edit.valor_cuota || 0),
+        cuotas_totales: Number(edit.cuotas_totales || 0),
+        cuotas_pagadas: Number(edit.cuotas_pagadas || 0),
+        primer_mes: edit.primer_mes ? Number(edit.primer_mes) : null,
+        primer_anio: edit.primer_anio ? Number(edit.primer_anio) : null,
+        dia_vencimiento: edit.dia_vencimiento
+          ? Number(edit.dia_vencimiento)
+          : 10,
+        banco: edit.banco || null,
+      };
+      await api.put(`/prestamos/${seleccionadoId}`, payload);
+      await loadAll();
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude eliminar");
+      alert(e?.response?.data?.detail || "No pude guardar los cambios.");
     }
   };
 
-  const actions =
-    fMes && fAnio ? (
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={ui.badge}>Pagado en {MESES[fMes - 1]?.label} {fAnio}: <b>{fmtCLP.format(detalleTotalMes || 0)}</b></span>
-        <span style={ui.badge}>Pagado total: <b>{fmtCLP.format(resumen.pagado_total || 0)}</b></span>
-        <span style={ui.badge}>Saldo total: <b>{fmtCLP.format(resumen.saldo_total || 0)}</b></span>
-      </div>
-    ) : (
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={ui.badge}>Pagado total: <b>{fmtCLP.format(resumen.pagado_total || 0)}</b></span>
-        <span style={ui.badge}>Saldo total: <b>{fmtCLP.format(resumen.saldo_total || 0)}</b></span>
-      </div>
-    );
-
-  const aplicarFiltros = async () => {
-    await load();
-    await loadDetalle();
+  const eliminarPrestamo = async () => {
+    try {
+      if (!seleccionadoId) return;
+      if (!confirm("¿Eliminar este préstamo?")) return;
+      await api.delete(`/prestamos/${seleccionadoId}`);
+      setSeleccionado(null);
+      await loadAll();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude eliminar el préstamo.");
+    }
   };
 
+  const marcarPago = async () => {
+    try {
+      if (!seleccionadoId) return;
+      if (!pay.mes || !pay.anio || !pay.monto) {
+        alert("Mes, año y monto son obligatorios.");
+        return;
+      }
+      await api.post("/pagos_prestamo", {
+        prestamo_id: seleccionadoId,
+        mes_contable: Number(pay.mes),
+        anio_contable: Number(pay.anio),
+        monto_pagado: Number(pay.monto),
+        fecha_pago: new Date().toISOString().slice(0, 10),
+      });
+      await loadAll();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude registrar el pago.");
+    }
+  };
+
+  // ----------------------------------
+  // Render
+  // ----------------------------------
   return (
-    <>
-      <style>{extraCSS}</style>
+    <AppShell
+      title="Préstamos"
+      actions={
+        <button style={ui.btn} onClick={loadAll}>
+          Actualizar
+        </button>
+      }
+    >
+      {/* Alta */}
+      <div style={ui.card}>
+        <div style={{ fontWeight: 700, marginBottom: 10 }}>➕ Agregar préstamo</div>
 
-      <AppShell title="Préstamos" actions={actions}>
-        {/* Filtros */}
-        <section style={ui.card}>
-          <div style={{ fontWeight: 700, marginBottom: 12 }}>Filtros</div>
-          <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <Labeled label="Mes (todos)">
-              <select
-                value={fMes}
-                onChange={(e) => setFMes(e.target.value)}
-                style={styles.input}
-                title="Filtrar por mes contable"
-              >
-                <option value="">Todos</option>
-                {MESES.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-              </select>
-            </Labeled>
+        <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr 1fr 1fr 1fr", gap: 10 }}>
+          <input
+            placeholder="Nombre"
+            value={form.nombre}
+            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
+            style={styles.input}
+          />
+          <input
+            placeholder="Valor de la cuota"
+            type="number"
+            value={form.valor_cuota}
+            onChange={(e) => setForm({ ...form, valor_cuota: e.target.value })}
+            style={styles.input}
+          />
+          <input
+            placeholder="Cuotas totales"
+            type="number"
+            value={form.cuotas_totales}
+            onChange={(e) => setForm({ ...form, cuotas_totales: e.target.value })}
+            style={styles.input}
+          />
+          <select
+            value={form.primer_mes || ""}
+            onChange={(e) => setForm({ ...form, primer_mes: e.target.value })}
+            style={styles.input}
+          >
+            <option value="">Selecciona...</option>
+            {meses.map((m) => (
+              <option key={m} value={m}>{mesesNombres[m]}</option>
+            ))}
+          </select>
+          <input
+            placeholder="Primer año (opcional)"
+            type="number"
+            value={form.primer_anio}
+            onChange={(e) => setForm({ ...form, primer_anio: e.target.value })}
+            style={styles.input}
+          />
+          <input
+            placeholder="Banco (opcional)"
+            value={form.banco}
+            onChange={(e) => setForm({ ...form, banco: e.target.value })}
+            style={styles.input}
+          />
+        </div>
 
-            <Labeled label="Año (ej: 2025)">
-              <input
-                type="number"
-                value={fAnio}
-                onChange={(e) => setFAnio(e.target.value)}
-                style={styles.input}
-              />
-            </Labeled>
+        <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+          <button style={ui.btn} onClick={guardarNuevo}>Guardar</button>
+          <button style={{ ...ui.btn, background: "#8899aa" }} onClick={cleanAlta}>
+            Limpiar
+          </button>
+        </div>
+      </div>
 
-            <button onClick={aplicarFiltros} style={styles.smallBtn}>Aplicar</button>
-            <button
-              onClick={async () => { setFMes(""); setFAnio(""); await aplicarFiltros(); }}
-              style={{ ...styles.smallBtn, background: "#8899aa" }}
+      {/* Tabla de préstamos */}
+      <div style={ui.card}>
+        <div style={{ fontWeight: 700, marginBottom: 12 }}>📄 Préstamos</div>
+        {loading ? (
+          <div>Cargando...</div>
+        ) : err ? (
+          <div style={styles.error}>{err}</div>
+        ) : prestamosConTotales.length === 0 ? (
+          <div style={{ opacity: 0.8 }}>No hay préstamos.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>ID</th>
+                  <th style={styles.th}>Nombre</th>
+                  <th style={styles.th}>Valor cuota</th>
+                  <th style={styles.th}>Cuotas totales</th>
+                  <th style={styles.th}>Total pagado</th>
+                  <th style={styles.th}>Deuda restante</th>
+                  <th style={styles.th}>Último pago</th>
+                </tr>
+              </thead>
+              <tbody>
+                {prestamosConTotales.map((r) => {
+                  const isSel = r.id === seleccionadoId;
+                  return (
+                    <tr
+                      key={r.id}
+                      onClick={() => onSelectRow(r)}
+                      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onSelectRow(r)}
+                      role="button"
+                      tabIndex={0}
+                      style={{
+                        cursor: "pointer",
+                        background: isSel ? "rgba(113,208,126,.15)" : "transparent",
+                      }}
+                    >
+                      <td style={styles.td}>{r.id}</td>
+                      <td style={styles.td}>{r.nombre}</td>
+                      <td style={styles.td}>{fmt.format(r.valor_cuota || 0)}</td>
+                      <td style={styles.td}>{r.cuotas_totales}</td>
+                      <td style={styles.td}>{fmt.format(r.total_pagado || 0)}</td>
+                      <td style={styles.td}>{fmt.format(r.deuda_restante || 0)}</td>
+                      <td style={styles.td}>
+                        {r.ultimo_mes ? `${mesesNombres[r.ultimo_mes]} ${r.ultimo_anio}` : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Panel de acciones del seleccionado */}
+      {seleccionado && (
+        <div style={ui.card}>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>
+            ✏️ Editar — <span style={ui.badge}>ID {seleccionado.id} · {seleccionado.nombre}</span>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr", gap: 10 }}>
+            <input
+              placeholder="Valor cuota"
+              type="number"
+              value={edit.valor_cuota}
+              onChange={(e) => setEdit({ ...edit, valor_cuota: e.target.value })}
+              style={styles.input}
+            />
+            <input
+              placeholder="Cuotas totales"
+              type="number"
+              value={edit.cuotas_totales}
+              onChange={(e) => setEdit({ ...edit, cuotas_totales: e.target.value })}
+              style={styles.input}
+            />
+            <input
+              placeholder="Cuotas pagadas"
+              type="number"
+              value={edit.cuotas_pagadas}
+              onChange={(e) => setEdit({ ...edit, cuotas_pagadas: e.target.value })}
+              style={styles.input}
+            />
+            <select
+              value={edit.primer_mes || ""}
+              onChange={(e) => setEdit({ ...edit, primer_mes: e.target.value })}
+              style={styles.input}
             >
-              Limpiar
+              <option value="">Selecciona...</option>
+              {meses.map((m) => (
+                <option key={m} value={m}>{mesesNombres[m]}</option>
+              ))}
+            </select>
+            <input
+              placeholder="Primer año"
+              type="number"
+              value={edit.primer_anio}
+              onChange={(e) => setEdit({ ...edit, primer_anio: e.target.value })}
+              style={styles.input}
+            />
+            <input
+              placeholder="Banco (opcional)"
+              value={edit.banco}
+              onChange={(e) => setEdit({ ...edit, banco: e.target.value })}
+              style={styles.input}
+            />
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+            <button style={ui.btn} onClick={guardarEdicion}>Guardar cambios</button>
+            <button style={{ ...ui.btn, background: "#ff3b30", color: "#fff" }} onClick={eliminarPrestamo}>
+              Eliminar
             </button>
           </div>
-        </section>
 
-        {/* Formulario */}
-        <section style={ui.card}>
-          <div style={{ fontWeight: 700, marginBottom: 12 }}>
-            {editingId ? "✏️ Editar préstamo" : "➕ Agregar préstamo"}
-          </div>
+          <hr style={{ borderColor: "#1f2a44", margin: "18px 0" }} />
 
-          <form onSubmit={handleSubmit} style={styles.grid}>
-            <Labeled label="Nombre">
-              <input
-                value={form.nombre}
-                onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-                style={styles.input}
-              />
-            </Labeled>
-
-            <Labeled label="Valor de la cuota">
-              <input
-                type="number"
-                value={form.valor_cuota}
-                onChange={(e) => setForm({ ...form, valor_cuota: e.target.value })}
-                style={styles.input}
-              />
-            </Labeled>
-
-            <Labeled label="Cuotas totales">
-              <input
-                type="number"
-                value={form.cuotas_totales}
-                onChange={(e) => setForm({ ...form, cuotas_totales: e.target.value })}
-                style={styles.input}
-              />
-            </Labeled>
-
-            <Labeled label="Cuotas pagadas (opcional)">
-              <input
-                type="number"
-                value={form.cuotas_pagadas}
-                onChange={(e) => setForm({ ...form, cuotas_pagadas: e.target.value })}
-                style={styles.input}
-              />
-            </Labeled>
-
-            <Labeled label="Primer mes">
-              <select
-                value={form.primer_mes}
-                onChange={(e) => setForm({ ...form, primer_mes: e.target.value })}
-                style={styles.input}
-                title="Primer mes de pago"
-              >
-                <option value="">Selecciona…</option>
-                {MESES.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-              </select>
-            </Labeled>
-
-            <Labeled label="Primer año">
-              <input
-                type="number"
-                value={form.primer_anio}
-                onChange={(e) => setForm({ ...form, primer_anio: e.target.value })}
-                style={styles.input}
-              />
-            </Labeled>
-
-            <Labeled label="Día de vencimiento (1–31)">
-              <input
-                type="number"
-                value={form.dia_vencimiento}
-                onChange={(e) => setForm({ ...form, dia_vencimiento: e.target.value })}
-                style={styles.input}
-                title="Día del mes en que vence cada cuota"
-                min={1}
-                max={31}
-              />
-            </Labeled>
-
-            <div style={{ display: "flex", gap: 10 }}>
-              <button type="submit" disabled={busy} style={ui.btn}>
-                {busy ? "Guardando..." : editingId ? "Guardar cambios" : "Guardar"}
-              </button>
-              {editingId && (
-                <button type="button" onClick={resetForm} style={{ ...ui.btn, background: "#8899aa" }}>
-                  Cancelar
-                </button>
-              )}
-            </div>
-          </form>
-        </section>
-
-        {/* Tabla de préstamos */}
-        <section style={ui.card}>
-          <div style={{ fontWeight: 700, marginBottom: 12 }}>📄 Préstamos</div>
-          {loading && <div>Cargando…</div>}
-          {err && <div style={styles.error}>{err}</div>}
-          {!loading && !err && (
-            items.length === 0 ? (
-              <div style={{ opacity: .8 }}>No hay préstamos.</div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Nombre</th>
-                      <th style={styles.th}>Cuota</th>
-                      <th style={styles.th}>Pagadas / Totales</th>
-                      <th style={styles.th}>Pagado</th>
-                      <th style={styles.th}>Saldo</th>
-                      <th style={styles.th}>Próxima</th>
-                      <th style={styles.th}>Acciones</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((p) => (
-                      <tr key={p.id}>
-                        <td style={styles.td}>{p.nombre}</td>
-                        <td style={styles.td}>{fmtCLP.format(p.valor_cuota)}</td>
-                        <td style={styles.td}>
-                          {p.cuotas_pagadas} / {p.cuotas_totales}
-                          {p.finalizado ? " ✅" : ""}
-                        </td>
-                        <td style={styles.td}>{fmtCLP.format(p.monto_pagado)}</td>
-                        <td style={styles.td}>{fmtCLP.format(p.saldo_restante)}</td>
-                        <td style={styles.td}>{fmtFecha(p.proxima_cuota)}</td>
-                        <td style={styles.td}>
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <button
-                              onClick={() => abrirModalPago(p)}
-                              disabled={p.finalizado}
-                              title={p.finalizado ? "Ya está pagado" : "Registrar pago de cuota"}
-                              className="btn-pagar"
-                            >
-                              Pagar cuota
-                            </button>
-                            <button onClick={() => handleEdit(p)} style={styles.smallBtn}>
-                              Editar
-                            </button>
-                            <button
-                              onClick={() => handleDelete(p.id)}
-                              style={{ ...styles.smallBtn, background: "#ff3b30", color: "#fff" }}
-                            >
-                              Eliminar
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          )}
-        </section>
-
-        {/* NUEVO: Panel de Detalle del mes */}
-        <section style={ui.card}>
-          <div style={{ fontWeight: 700, marginBottom: 12 }}>
-            📅 Detalle del mes {fMes && fAnio ? `— ${MESES[fMes - 1]?.label} ${fAnio}` : ""}
-          </div>
-
-          {!fMes || !fAnio ? (
-            <div style={{ opacity: .8 }}>Selecciona <b>Mes</b> y <b>Año</b> arriba y presiona <b>Aplicar</b> para ver el detalle.</div>
-          ) : detLoading ? (
-            <div>Cargando detalle…</div>
-          ) : detErr ? (
-            <div style={styles.error}>{detErr}</div>
-          ) : detalleMes.length === 0 ? (
-            <div style={{ opacity: .8 }}>No hay cuotas programadas para ese mes.</div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Préstamo</th>
-                    <th style={styles.th}># Cuota</th>
-                    <th style={styles.th}>Mes contable</th>
-                    <th style={styles.th}>Estado</th>
-                    <th style={styles.th}>Monto</th>
-                    <th style={styles.th}>Vence el</th>
-                    <th style={styles.th}>Fecha de pago</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detalleMes.map((d, i) => (
-                    <tr key={i}>
-                      <td style={styles.td}>{d.nombre}</td>
-                      <td style={styles.td}>{d.cuota_num}</td>
-                      <td style={styles.td}>
-                        {MESES[d.mes_contable - 1]?.label} {d.anio_contable}
-                      </td>
-                      <td style={styles.td}>
-                        {d.estado === "pagado" ? "Pagado ✅" : "Pendiente ⏳"}
-                      </td>
-                      <td style={styles.td}>{fmtCLP.format(d.monto)}</td>
-                      <td style={styles.td}>{fmtFecha(d.vence_el)}</td>
-                      <td style={styles.td}>{fmtFecha(d.fecha_pago)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </section>
-      </AppShell>
-
-      {/* Modal de pago */}
-      {payOpen && (
-        <div className="modal-mask" onClick={cerrarModalPago}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>
-              Registrar pago {payTarget?.nombre ? `– ${payTarget.nombre}` : ""}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <Labeled label="Mes">
-                <select value={payMes} onChange={(e) => setPayMes(e.target.value)} style={styles.input}>
-                  <option value="">Selecciona…</option>
-                  {MESES.map((m) => (
-                    <option key={m.value} value={m.value}>{m.label}</option>
-                  ))}
-                </select>
-              </Labeled>
-              <Labeled label="Año">
-                <input type="number" value={payAnio} onChange={(e) => setPayAnio(e.target.value)} style={styles.input} />
-              </Labeled>
-            </div>
-            <div className="modal-actions">
-              <button onClick={cerrarModalPago} style={{ ...ui.btn, background: "#8899aa" }}>Cancelar</button>
-              <button onClick={confirmarPago} disabled={payBusy || !payMes || !payAnio} className="btn-pagar">
-                {payBusy ? "Guardando..." : "Confirmar pago"}
-              </button>
-            </div>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>💳 Marcar pago</div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <select
+              value={pay.mes || ""}
+              onChange={(e) => setPay({ ...pay, mes: Number(e.target.value) })}
+              style={styles.input}
+            >
+              <option value="">Mes</option>
+              {meses.map((m) => (
+                <option key={m} value={m}>{mesesNombres[m]}</option>
+              ))}
+            </select>
+            <input
+              placeholder="Año"
+              type="number"
+              value={pay.anio}
+              onChange={(e) => setPay({ ...pay, anio: Number(e.target.value) })}
+              style={styles.input}
+            />
+            <input
+              placeholder="Monto"
+              type="number"
+              value={pay.monto}
+              onChange={(e) => setPay({ ...pay, monto: e.target.value })}
+              style={styles.input}
+            />
+            <button style={ui.btn} onClick={marcarPago}>
+              Marcar pago ({fmt.format(Number(pay.monto || 0))})
+            </button>
           </div>
         </div>
       )}
-    </>
+    </AppShell>
   );
 }
 
 const styles = {
-  labeled: { display: "flex", flexDirection: "column", gap: 6 },
-  labelText: { fontSize: 12, color: "#8ea3c0", paddingLeft: 2 },
   input: {
     padding: "8px 10px",
     borderRadius: 8,
     border: "1px solid #23304a",
     background: "#0e1626",
     color: "#e6f0ff",
-    width: "100%",
   },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-    gap: 16,
-    alignItems: "end",
-  },
-  smallBtn: {
-    padding: "6px 10px",
-    border: 0,
-    borderRadius: 8,
-    background: "#ffd166",
-    color: "#162",
-    fontWeight: 700,
-    cursor: "pointer",
-  },
-  error: { background: "#ff3b30", color: "#fff", padding: "8px 10px", borderRadius: 8 },
   table: { width: "100%", borderCollapse: "collapse" },
-  th: { textAlign: "left", padding: "10px 8px", borderBottom: "1px solid #1f2a44", whiteSpace: "nowrap" },
-  td: { padding: "8px", borderBottom: "1px solid #1f2a44" },
+  th: {
+    textAlign: "left",
+    padding: "10px 8px",
+    borderBottom: "1px solid #1f2a44",
+    whiteSpace: "nowrap",
+    fontWeight: 700,
+  },
+  td: {
+    padding: "8px",
+    borderBottom: "1px solid #1f2a44",
+    whiteSpace: "nowrap",
+  },
+  error: {
+    background: "#ff3b30",
+    color: "#fff",
+    padding: "8px 10px",
+    borderRadius: 8,
+  },
 };
