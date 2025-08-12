@@ -6,7 +6,6 @@ import { AuthContext } from "../context/AuthContext";
 export default function AppShell({ title = "Panel", actions, children }) {
   const { user, logout } = useContext(AuthContext);
 
-  // Para evitar reuso de objetos estilo, usamos funciones que devuelven el estilo final
   const navStyle = ({ isActive }) => ({
     ...ui.navLink,
     ...(isActive ? ui.navLinkActive : {}),
@@ -14,7 +13,6 @@ export default function AppShell({ title = "Panel", actions, children }) {
 
   return (
     <div style={ui.wrapper}>
-      {/* Header fijo con marca, tabs y usuario */}
       <header style={ui.header}>
         <div style={ui.brandRow}>
           <div style={ui.brand}>
@@ -23,13 +21,13 @@ export default function AppShell({ title = "Panel", actions, children }) {
             <span style={ui.brandMuted}>— {title}</span>
           </div>
 
-          {/* Tabs (mismo menú para todas las páginas) */}
           <nav style={ui.nav}>
             <NavLink to="/" end style={navStyle}>Dashboard</NavLink>
             <NavLink to="/gastos" style={navStyle}>Gastos</NavLink>
             <NavLink to="/prestamos" style={navStyle}>Préstamos</NavLink>
-            <NavLink to="/tarjetas" style={navStyle}>Facturación tarjetas</NavLink>
+            <NavLink to="/facturacion" style={navStyle}>Facturación tarjetas</NavLink>
             <NavLink to="/sueldo" style={navStyle}>Ingresar sueldo</NavLink>
+            <NavLink to="/tarjetas" style={navStyle}>Tarjetas</NavLink> {/* último */}
           </nav>
         </div>
 
@@ -39,7 +37,6 @@ export default function AppShell({ title = "Panel", actions, children }) {
         </div>
       </header>
 
-      {/* Contenido */}
       <main style={ui.main}>
         <div style={ui.titleBar}>
           <h1 style={ui.h1}>{title}</h1>
@@ -93,4 +90,3 @@ export const ui = {
   btn: { padding:"8px 12px", border:0, borderRadius:8, background:"#71d07e", color:"#032312", fontWeight:700, cursor:"pointer" },
   badge: { background:"#1e2a44", padding:"4px 8px", borderRadius: 999, fontSize:12, opacity:.9 }
 };
-

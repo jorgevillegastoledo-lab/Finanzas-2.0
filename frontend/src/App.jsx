@@ -3,12 +3,14 @@ import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "./context/AuthContext";
 import ProtectedRoute from "./components/ProtectedRoute";
+
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import Gastos from "./pages/Gastos";
 import Prestamos from "./pages/Prestamos";
 import Tarjetas from "./pages/Tarjetas";
 import Sueldo from "./pages/Sueldo";
+import FacturacionTarjetas from "./pages/FacturacionTarjetas";
 
 export default function App() {
   return (
@@ -43,10 +45,10 @@ export default function App() {
           }
         />
         <Route
-          path="/tarjetas"
+          path="/facturacion"
           element={
             <ProtectedRoute>
-              <Tarjetas />
+              <FacturacionTarjetas />
             </ProtectedRoute>
           }
         />
@@ -55,6 +57,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <Sueldo />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/tarjetas"
+          element={
+            <ProtectedRoute>
+              <Tarjetas />
             </ProtectedRoute>
           }
         />
