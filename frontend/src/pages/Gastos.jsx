@@ -1,334 +1,494 @@
 // frontend/src/pages/Gastos.jsx
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 
+const MESES = [
+  "",
+  "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+  "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre",
+];
+
+const hoy = new Date();
+const MES_ACTUAL = hoy.getMonth() + 1; // 1..12
+const ANIO_ACTUAL = hoy.getFullYear();
+
+const fmtCLP = (n) =>
+  new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(n || 0));
+
+// Pequeño helper: Etiqueta + control
+function Field({ label, children, style }) {
+  return (
+    <div style={{ ...styles.field, ...(style || {}) }}>
+      <div style={styles.label}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
 export default function Gastos() {
+  // --- Estado de lista / filtros ---
   const [gastos, setGastos] = useState([]);
-  const [loadingG, setLoadingG] = useState(true);
-  const [errorG, setErrorG] = useState("");
-  const [totales, setTotales] = useState({ mes: null, anio: null });
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
 
-  const [form, setForm] = useState({
-    nombre: "",
-    monto: "",
-    mes: "",
-    anio: "",
-    pagado: false,
-  });
-  const [editingId, setEditingId] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [msgErr, setMsgErr] = useState("");
-
-  // Filtros
-  const [fMes, setFMes] = useState("");
-  const [fAnio, setFAnio] = useState("");
+  // Mes/Año por defecto = actuales
+  const [fMes, setFMes] = useState(String(MES_ACTUAL));   // como string, luego convertimos
+  const [fAnio, setFAnio] = useState(String(ANIO_ACTUAL));
   const [fPagado, setFPagado] = useState(false);
 
-  const fmt = new Intl.NumberFormat("es-CL", {
-    style: "currency",
-    currency: "CLP",
-    maximumFractionDigits: 0,
+  // Totales mostrados en la tarjeta de filtros
+  const totalFiltrado = useMemo(
+    () => gastos.reduce((a, g) => a + Number(g.monto || 0), 0),
+    [gastos]
+  );
+
+  // --- Crear gasto ---
+  const [nuevo, setNuevo] = useState({
+    nombre: "",
+    monto: "",
+    mes: String(MES_ACTUAL),
+    anio: String(ANIO_ACTUAL),
+    pagado: false,
   });
-  const meses = [
-    "",
-    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
-    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre",
-  ];
+  const [savingNew, setSavingNew] = useState(false);
 
-  const calcularTotales = (items) => {
-    const base = fPagado ? items.filter((g) => !!g.pagado) : items;
-    const totalMes  = fMes  !== "" ? base.reduce((a, g) => a + (Number(g.monto) || 0), 0) : null;
-    const totalAnio = fAnio !== "" ? base.reduce((a, g) => a + (Number(g.monto) || 0), 0) : null;
-    setTotales({ mes: totalMes, anio: totalAnio });
-  };
+  // --- Selección y edición (panel inferior) ---
+  const [sel, setSel] = useState(null); // gasto seleccionado (objeto)
+  const [edit, setEdit] = useState({ nombre: "", monto: "", mes: "", anio: "", pagado: false });
+  const editRef = useRef(null);
 
-  const loadGastos = async () => {
+  // Carga inicial automática con el mes/año actuales
+  useEffect(() => {
+    loadGastos();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!sel) return;
+    setEdit({
+      nombre: sel.nombre ?? "",
+      monto: String(sel.monto ?? ""),
+      mes: String(sel.mes ?? ""),
+      anio: String(sel.anio ?? ""),
+      pagado: Boolean(sel.pagado),
+    });
+    // scroll suave al panel
+    setTimeout(() => editRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }, [sel]);
+
+  async function loadGastos() {
     try {
-      setErrorG("");
-      setLoadingG(true);
+      setErr("");
+      setLoading(true);
 
-      // ⚠️ Con el backend nuevo, si no hay MES y AÑO juntos, NO llamamos a la API
+      // Requerimos MES y AÑO a la vez
       if (!fMes || !fAnio) {
         setGastos([]);
-        setTotales({ mes: null, anio: null });
         return;
       }
 
       const { data } = await api.get("/gastos", {
-        params: {
-          mes: Number(fMes),
-          anio: Number(fAnio),
-          // el backend actual no usa 'pagado' como query;
-          // si quieres filtrar, lo hacemos client-side:
-          // pagado: fPagado ? true : undefined,
-        },
+        params: { mes: Number(fMes), anio: Number(fAnio) },
       });
 
-      // El backend ahora responde { ok: true, data: [...] }
-      const itemsRaw = Array.isArray(data) ? data : (data?.data ?? data?.items ?? []);
-      const items = fPagado ? itemsRaw.filter((g) => !!g.pagado) : itemsRaw;
+      let items = Array.isArray(data) ? data : (data?.data ?? []);
+      if (fPagado) items = items.filter((g) => !!g.pagado);
 
       setGastos(items);
-      if (data?.totales && (data.totales.mes !== undefined || data.totales.anio !== undefined)) {
-        setTotales({ mes: data.totales.mes ?? null, anio: data.totales.anio ?? null });
-      } else {
-        calcularTotales(items);
+
+      // Mantener selección si coincide
+      if (sel) {
+        const keep = items.find((x) => x.id === sel.id);
+        setSel(keep || null);
       }
-    } catch (err) {
-      // Si por error se llamó sin params, el backend devuelve 422; mostramos mensaje simple
-      const msg = err?.response?.data?.detail || "No pude cargar gastos";
-      setErrorG(msg);
+    } catch (e) {
+      setErr(e?.response?.data?.detail || "No pude cargar gastos");
     } finally {
-      setLoadingG(false);
+      setLoading(false);
     }
-  };
+  }
 
-  useEffect(() => {
-    // Al montar ya no llamamos si no hay filtros; dejamos la página vacía
-    setLoadingG(false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const resetForm = () => {
-    setForm({ nombre: "", monto: "", mes: "", anio: "", pagado: false });
-    setEditingId(null);
-    setMsgErr("");
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setMsgErr("");
-
-    if (!form.nombre || !form.monto) {
-      setMsgErr("Nombre y monto son obligatorios.");
+  // --- Crear ---
+  async function crearGasto(e) {
+    e?.preventDefault?.();
+    if (!nuevo.nombre || !nuevo.monto) {
+      alert("Nombre y monto son obligatorios.");
       return;
     }
-
-    setBusy(true);
     try {
-      const payload = {
-        nombre: form.nombre,
-        monto: Number(form.monto),
-        mes: form.mes ? Number(form.mes) : null,
-        anio: form.anio ? Number(form.anio) : null,
-        pagado: Boolean(form.pagado),
-      };
-
-      if (editingId) {
-        await api.put(`/gastos/${editingId}`, payload);
-      } else {
-        await api.post("/gastos", payload);
-      }
-      resetForm();
+      setSavingNew(true);
+      await api.post("/gastos", {
+        nombre: nuevo.nombre,
+        monto: Number(nuevo.monto),
+        mes: nuevo.mes ? Number(nuevo.mes) : null,
+        anio: nuevo.anio ? Number(nuevo.anio) : null,
+        pagado: Boolean(nuevo.pagado),
+      });
+      setNuevo({ nombre: "", monto: "", mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL), pagado: false });
       await loadGastos();
-    } catch (err) {
-      setMsgErr(err?.response?.data?.detail || "No pude guardar el gasto");
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude guardar el gasto");
     } finally {
-      setBusy(false);
+      setSavingNew(false);
     }
-  };
+  }
 
-  const handleEdit = (g) => {
-    setEditingId(g.id);
-    setForm({
-      nombre: g.nombre ?? "",
-      monto: g.monto ?? "",
-      mes: g.mes ?? "",
-      anio: g.anio ?? "",
-      pagado: Boolean(g.pagado),
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
+  // --- Editar / eliminar / marcar pagado ---
+  async function guardarEdicion() {
+    if (!sel) return;
+    try {
+      await api.put(`/gastos/${sel.id}`, {
+        nombre: edit.nombre,
+        monto: Number(edit.monto || 0),
+        mes: edit.mes ? Number(edit.mes) : null,
+        anio: edit.anio ? Number(edit.anio) : null,
+        pagado: Boolean(edit.pagado),
+      });
+      await loadGastos();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude guardar cambios");
+    }
+  }
 
-  const handleDelete = async (id) => {
+  async function eliminarSeleccionado() {
+    if (!sel) return;
     if (!confirm("¿Eliminar gasto?")) return;
     try {
-      await api.delete(`/gastos/${id}`);
+      await api.delete(`/gastos/${sel.id}`);
+      setSel(null);
       await loadGastos();
-    } catch (err) {
-      alert(err?.response?.data?.detail || "No pude eliminar");
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude eliminar");
     }
-  };
+  }
+
+  async function marcarPagado(flag) {
+    if (!sel) return;
+    try {
+      await api.put(`/gastos/${sel.id}`, {
+        nombre: sel.nombre,
+        monto: Number(sel.monto || 0),
+        mes: sel.mes,
+        anio: sel.anio,
+        pagado: Boolean(flag),
+      });
+      await loadGastos();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude actualizar el estado de pago");
+    }
+  }
+
+  // Helper: restablecer filtros a mes/año actuales
+  function resetFiltros() {
+    setFMes(String(MES_ACTUAL));
+    setFAnio(String(ANIO_ACTUAL));
+    setFPagado(false);
+    setErr("");
+    setTimeout(loadGastos, 0);
+  }
 
   return (
-    <AppShell
-      title="Gastos"
-      actions={
-        <button onClick={loadGastos} style={ui.btn}>
-          Actualizar
-        </button>
-      }
-    >
-      {/* Formulario */}
+    <AppShell title="Gastos" actions={<button onClick={loadGastos} style={ui.btn}>Actualizar</button>}>
+
+      {/* Agregar gasto */}
       <div style={ui.card}>
-        <div style={styles.cardTitle}>
-          {editingId ? "✏️ Editar gasto" : "➕ Agregar gasto"}
-        </div>
-        <form onSubmit={handleSubmit} style={styles.grid}>
-          <input
-            placeholder="Nombre"
-            value={form.nombre}
-            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Monto"
-            type="number"
-            value={form.monto}
-            onChange={(e) => setForm({ ...form, monto: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Mes (1-12)"
-            type="number"
-            min="1"
-            max="12"
-            value={form.mes}
-            onChange={(e) => setForm({ ...form, mes: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Año (ej: 2025)"
-            type="number"
-            value={form.anio}
-            onChange={(e) => setForm({ ...form, anio: e.target.value })}
-            style={styles.input}
-          />
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ fontWeight: 700, marginBottom: 12 }}>➕ Agregar gasto</div>
+
+        <form
+          onSubmit={crearGasto}
+          style={{
+            display: "grid",
+            gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto",
+            gap: 10,
+            alignItems: "end",
+          }}
+        >
+          <Field label="Nombre">
             <input
-              type="checkbox"
-              checked={form.pagado}
-              onChange={(e) => setForm({ ...form, pagado: e.target.checked })}
+              value={nuevo.nombre}
+              onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })}
+              style={styles.input}
+              placeholder="Ej: Internet"
             />
-            Pagado
-          </label>
-          <div style={{ display: "flex", gap: 10 }}>
-            <button type="submit" disabled={busy} style={ui.btn}>
-              {busy ? "Guardando..." : editingId ? "Guardar cambios" : "Guardar"}
-            </button>
-            {editingId && (
-              <button
-                type="button"
-                onClick={resetForm}
-                style={{ ...ui.btn, background: "#8899aa" }}
-              >
-                Cancelar
-              </button>
-            )}
-          </div>
+          </Field>
+
+          <Field label="Monto">
+            <input
+              type="number"
+              value={nuevo.monto}
+              onChange={(e) => setNuevo({ ...nuevo, monto: e.target.value })}
+              style={styles.input}
+            />
+          </Field>
+
+          <Field label="Mes">
+            <select
+              value={nuevo.mes}
+              onChange={(e) => setNuevo({ ...nuevo, mes: e.target.value })}
+              style={styles.input}
+            >
+              <option value="">Mes</option>
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                <option key={m} value={m}>{MESES[m]}</option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Año">
+            <input
+              type="number"
+              value={nuevo.anio}
+              onChange={(e) => setNuevo({ ...nuevo, anio: e.target.value })}
+              style={styles.input}
+            />
+          </Field>
+
+          <Field label="Pagado">
+            <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
+              <input
+                type="checkbox"
+                checked={nuevo.pagado}
+                onChange={(e) => setNuevo({ ...nuevo, pagado: e.target.checked })}
+              />
+              Sí
+            </label>
+          </Field>
+
+          <button type="submit" disabled={savingNew} style={ui.btn}>
+            {savingNew ? "Guardando..." : "Guardar"}
+          </button>
         </form>
-        {msgErr && <div style={styles.error}>{msgErr}</div>}
       </div>
 
       {/* Filtros + totales */}
       <div style={ui.card}>
-        <div style={styles.cardTitle}>Filtros</div>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
-          <select value={fMes} onChange={(e) => setFMes(e.target.value)} style={styles.input}>
-            <option value="">Mes (todos)</option>
-            {[...Array(12)].map((_, i) => (
-              <option key={i + 1} value={i + 1}>{i + 1}</option>
-            ))}
-          </select>
+        <div style={{ fontWeight: 700, marginBottom: 12 }}>Filtros</div>
 
-          <input
-            type="number"
-            placeholder="Año (ej: 2025)"
-            value={fAnio}
-            onChange={(e) => setFAnio(e.target.value)}
-            style={styles.input}
-          />
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr auto auto",
+            gap: 10,
+            alignItems: "end",
+            marginBottom: 12,
+            maxWidth: 680,
+          }}
+        >
+          <Field label="Mes">
+            <select value={fMes} onChange={(e) => setFMes(e.target.value)} style={styles.input}>
+              <option value="">Mes</option>
+              {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                <option key={m} value={m}>{MESES[m]}</option>
+              ))}
+            </select>
+          </Field>
 
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Field label="Año">
             <input
-              type="checkbox"
-              checked={fPagado}
-              onChange={(e) => setFPagado(e.target.checked)}
+              type="number"
+              value={fAnio}
+              onChange={(e) => setFAnio(e.target.value)}
+              style={styles.input}
+              placeholder="Ej: 2025"
             />
-            Pagado
-          </label>
+          </Field>
 
-          <button onClick={loadGastos} style={styles.smallBtn}>Aplicar</button>
-          <button
-            onClick={() => {
-              setFMes("");
-              setFAnio("");
-              setFPagado(false);
-              setTotales({ mes: null, anio: null });
-              setGastos([]);
-              setErrorG("");
-            }}
-            style={{ ...styles.smallBtn, background: "#8899aa" }}
-          >
-            Limpiar
-          </button>
+          <div style={{ display: "flex", alignItems: "end" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <input type="checkbox" checked={fPagado} onChange={(e) => setFPagado(e.target.checked)} />
+              Pagado
+            </label>
+          </div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={loadGastos} style={styles.smallBtn}>Aplicar</button>
+            <button onClick={resetFiltros} style={{ ...styles.smallBtn, background: "#8899aa" }}>Limpiar</button>
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 16, opacity: 0.9 }}>
-          {totales?.mes !== null  && <div> Total mes:  <b>{fmt.format(totales.mes)}</b>  </div>}
-          {totales?.anio !== null && <div> Total año: <b>{fmt.format(totales.anio)}</b> </div>}
+          {fMes && fAnio && (
+            <div>
+              Total (vista filtrada): <b>{fmtCLP(totalFiltrado)}</b>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Tabla */}
+      {/* Tabla (selección por fila) */}
       <div style={ui.card}>
-        <div style={styles.cardTitle}>🧾 Lista de gastos</div>
-        {loadingG && <div>Cargando gastos…</div>}
-        {errorG && <div style={styles.error}>{errorG}</div>}
-        {!loadingG && !errorG && (
-          gastos.length === 0 ? (
-            <div style={{ opacity: 0.8 }}>
-              {(!fMes || !fAnio) ? "Selecciona Mes y Año y presiona Aplicar." : "No hay gastos."}
-            </div>
-          ) : (
+        <div style={{ fontWeight: 700, marginBottom: 12 }}>🧾 Lista de gastos</div>
+
+        {loading ? (
+          <div>Cargando gastos…</div>
+        ) : err ? (
+          <div style={styles.error}>{err}</div>
+        ) : gastos.length === 0 ? (
+          <div style={{ opacity: 0.8 }}>
+            {(!fMes || !fAnio) ? "Selecciona Mes y Año y presiona Aplicar." : "No hay gastos."}
+          </div>
+        ) : (
+          <>
             <div style={{ overflowX: "auto" }}>
-              <table style={styles.table}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>ID</th>
-                    <th style={styles.th}>Nombre</th>
-                    <th style={styles.th}>Monto</th>
-                    <th style={styles.th}>Mes</th>
-                    <th style={styles.th}>Año</th>
-                    <th style={styles.th}>Pagado</th>
-                    <th style={styles.th}>Acciones</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {gastos.map((g) => (
-                    <tr key={g.id}>
-                      <td style={styles.td}>{g.id}</td>
-                      <td style={styles.td}>{g.nombre}</td>
-                      <td style={styles.td}>{fmt.format(Number(g.monto || 0))}</td>
-                      <td style={styles.td}>{g.mes ? meses[g.mes] : "-"}</td>
-                      <td style={styles.td}>{g.anio ?? "-"}</td>
-                      <td style={styles.td}>{g.pagado ? "Sí" : "No"}</td>
-                      <td style={styles.td}>
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button onClick={() => handleEdit(g)} style={styles.smallBtn}>Editar</button>
-                          <button
-                            onClick={() => handleDelete(g.id)}
-                            style={{ ...styles.smallBtn, background: "#ff3b30", color: "#fff" }}
-                          >
-                            Eliminar
-                          </button>
-                        </div>
-                      </td>
+              <div style={{ maxHeight: "50vh", overflowY: "auto", border: "1px solid #1f2a44", borderRadius: 12 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ position: "sticky", top: 0, background: "#0e1626", zIndex: 1 }}>
+                      <th style={styles.th}>ID</th>
+                      <th style={styles.th}>Nombre</th>
+                      <th style={styles.th}>Monto</th>
+                      <th style={styles.th}>Mes</th>
+                      <th style={styles.th}>Año</th>
+                      <th style={styles.th}>Pagado</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {gastos.map((g) => {
+                      const selected = sel?.id === g.id;
+                      return (
+                        <tr
+                          key={g.id}
+                          onClick={() => setSel(g)}
+                          style={{ ...styles.tr, background: selected ? "#1a253a" : "transparent" }}
+                        >
+                          <td style={styles.td}>{g.id}</td>
+                          <td style={styles.td}>{g.nombre}</td>
+                          <td style={styles.td}>{fmtCLP(g.monto)}</td>
+                          <td style={styles.td}>{g.mes ? MESES[g.mes] : "—"}</td>
+                          <td style={styles.td}>{g.anio ?? "—"}</td>
+                          <td style={styles.td}>{g.pagado ? "Sí" : "No"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          )
+
+            {!sel && (
+              <div style={{ marginTop: 10, opacity: 0.7, fontSize: 13 }}>
+                Tip: haz clic en una fila para editar, eliminar o marcar/deshacer pago.
+              </div>
+            )}
+          </>
         )}
       </div>
+
+      {/* Panel de edición / acciones — SOLO si hay selección */}
+      {sel && (
+        <div style={ui.card} ref={editRef}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <div style={{ fontWeight: 700 }}>✏️ Editar</div>
+            <span style={{ fontSize: 12, background: "#0e1626", padding: "4px 8px", borderRadius: 6 }}>
+              ID {sel.id} — {sel.nombre}
+            </span>
+            <button
+              onClick={() => setSel(null)}
+              style={{ marginLeft: "auto", textDecoration: "underline", opacity: 0.8 }}
+            >
+              Limpiar selección
+            </button>
+          </div>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr auto auto",
+              gap: 10,
+              alignItems: "end",
+            }}
+          >
+            <Field label="Nombre">
+              <input
+                value={edit.nombre}
+                onChange={(e) => setEdit({ ...edit, nombre: e.target.value })}
+                style={styles.input}
+              />
+            </Field>
+
+            <Field label="Monto">
+              <input
+                type="number"
+                value={edit.monto}
+                onChange={(e) => setEdit({ ...edit, monto: e.target.value })}
+                style={styles.input}
+              />
+            </Field>
+
+            <Field label="Mes">
+              <select
+                value={edit.mes || ""}
+                onChange={(e) => setEdit({ ...edit, mes: e.target.value })}
+                style={styles.input}
+              >
+                <option value="">Mes</option>
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>{MESES[m]}</option>
+                ))}
+              </select>
+            </Field>
+
+            <Field label="Año">
+              <input
+                type="number"
+                value={edit.anio || ""}
+                onChange={(e) => setEdit({ ...edit, anio: e.target.value })}
+                style={styles.input}
+              />
+            </Field>
+
+            <Field label="Pagado">
+              <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
+                <input
+                  type="checkbox"
+                  checked={edit.pagado}
+                  onChange={(e) => setEdit({ ...edit, pagado: e.target.checked })}
+                />
+                Sí
+              </label>
+            </Field>
+
+            <button onClick={guardarEdicion} style={ui.btn}>Guardar cambios</button>
+            <button onClick={eliminarSeleccionado} style={{ ...ui.btn, background: "#ff3b30" }}>
+              Eliminar
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+            <button
+              onClick={() => marcarPagado(true)}
+              disabled={sel?.pagado}
+              style={{ ...ui.btn, background: "#1e90ff", opacity: sel?.pagado ? 0.6 : 1 }}
+              title={sel?.pagado ? "Ya está pagado" : ""}
+            >
+              {sel?.pagado ? "Ya pagado" : "Marcar pagado"}
+            </button>
+            <button
+              onClick={() => marcarPagado(false)}
+              disabled={!sel?.pagado}
+              style={{ ...ui.btn, background: "#6c757d", opacity: !sel?.pagado ? 0.6 : 1 }}
+            >
+              Deshacer pagado
+            </button>
+          </div>
+        </div>
+      )}
     </AppShell>
   );
 }
 
 const styles = {
-  cardTitle: { fontWeight: 700, marginBottom: 12 },
+  field: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  label: {
+    fontSize: 12,
+    opacity: 0.75,
+    paddingLeft: 2,
+  },
   input: {
     padding: "8px 10px",
     borderRadius: 8,
@@ -336,20 +496,18 @@ const styles = {
     background: "#0e1626",
     color: "#e6f0ff",
   },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
-    gap: 10,
-    alignItems: "center",
-  },
-  table: { width: "100%", borderCollapse: "collapse" },
   th: {
     textAlign: "left",
     padding: "10px 8px",
     borderBottom: "1px solid #1f2a44",
     whiteSpace: "nowrap",
   },
-  td: { padding: "8px", borderBottom: "1px solid #1f2a44" },
+  td: {
+    padding: "8px",
+    borderBottom: "1px solid #1f2a44",
+    whiteSpace: "nowrap",
+  },
+  tr: { cursor: "pointer" },
   smallBtn: {
     padding: "6px 10px",
     border: 0,

@@ -7,6 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, ConfigDict
 
+from sqlalchemy import text
+from db import get_db
+
 from db import SessionLocal, Base, engine
 from sqlalchemy import Column, Integer, String, DateTime, func
 
@@ -189,3 +192,24 @@ def eliminar_prestamo(pid: int, db: Session = Depends(get_db), _user=Depends(get
     db.delete(p)
     db.commit()
     return {"ok": True}
+    
+    
+    @r.post("/pagos_prestamo")
+def registrar_pago(body: dict, db=Depends(get_db)):
+    q = text("""
+      INSERT INTO pagos_prestamo (prestamo_id, mes_contable, anio_contable, valor_cuota)
+      VALUES (:prestamo_id, :mes, :anio, :valor)
+      RETURNING *;
+    """)
+    try:
+        row = db.execute(q, {
+            "prestamo_id": body["prestamo_id"],
+            "mes": body["mes_contable"],
+            "anio": body["anio_contable"],
+            # si viene null, el trigger BEFORE INSERT lo completa
+            "valor": body.get("valor_cuota"),
+        }).mappings().first()
+        return row
+    except Exception as e:
+        # índice único o cualquier otra restricción
+        raise HTTPException(400, f"No se pudo registrar el pago: {e}")

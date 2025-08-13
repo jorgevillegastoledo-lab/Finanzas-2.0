@@ -1,489 +1,369 @@
 // frontend/src/pages/Prestamos.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 
-const mesesNombres = [
-  "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-];
+const MESES = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const hoy = new Date();
+const MES_ACTUAL = hoy.getMonth() + 1;
+const ANIO_ACTUAL = hoy.getFullYear();
 
-const fmt = new Intl.NumberFormat("es-CL", {
-  style: "currency",
-  currency: "CLP",
-  maximumFractionDigits: 0,
-});
+const fmtCLP = (n) =>
+  new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(n || 0));
+
+// Etiqueta arriba del campo
+const L = ({ label, children }) => (
+  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+    <span style={{ fontSize: 12, color: "#9db7d3", opacity: 0.9, padding: "0 2px" }}>{label}</span>
+    {children}
+  </div>
+);
 
 export default function Prestamos() {
-  const [prestamos, setPrestamos] = useState([]);
-  const [pagos, setPagos] = useState([]); // pagos_prestamo
-  const [loading, setLoading] = useState(true);
+  // Vista contable (para ocultar préstamos “no iniciados”)
+  const [vMes, setVMes] = useState(MES_ACTUAL);
+  const [vAnio, setVAnio] = useState(ANIO_ACTUAL);
+
+  // Listado (usaremos /prestamos/resumen para traer totales calculados)
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // selección
-  const [seleccionado, setSeleccionado] = useState(null); // objeto préstamo
-  const seleccionadoId = seleccionado?.id ?? null;
-
-  // formulario alta
-  const [form, setForm] = useState({
-    nombre: "",
-    valor_cuota: "",
-    cuotas_totales: "",
-    primer_mes: "",
-    primer_anio: "",
-    dia_vencimiento: 10,
-    banco: "",
+  // Crear préstamo
+  const [nuevo, setNuevo] = useState({
+    nombre: "", valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: ""
   });
 
-  // form edición/pago para el seleccionado
+  // Selección / edición
+  const [sel, setSel] = useState(null);
   const [edit, setEdit] = useState({
-    valor_cuota: "",
-    cuotas_totales: "",
-    cuotas_pagadas: "",
-    primer_mes: "",
-    primer_anio: "",
-    dia_vencimiento: "",
-    banco: "",
+    valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: ""
   });
-  const [pay, setPay] = useState({ mes: "", anio: "", monto: "" });
 
-  const meses = Array.from({ length: 12 }, (_, i) => i + 1);
+  // Registrar pago
+  const [pagoMes, setPagoMes] = useState(MES_ACTUAL);
+  const [pagoAnio, setPagoAnio] = useState(ANIO_ACTUAL);
+  const [pagoValor, setPagoValor] = useState("");
 
-  // ----------------------------------
-  // Cargar datos
-  // ----------------------------------
-  const loadAll = async () => {
+  const editRef = useRef(null);
+
+  useEffect(() => { listar(); }, []);
+  useEffect(() => {
+    if (!sel) return;
+    setEdit({
+      valor_cuota: String(sel.valor_cuota ?? ""),
+      cuotas_totales: String(sel.cuotas_totales ?? ""),
+      primer_mes: String(sel.primer_mes ?? ""),
+      primer_anio: String(sel.primer_anio ?? ""),
+      banco: String(sel.banco ?? "")
+    });
+    setPagoValor(String(sel.valor_cuota ?? ""));
+    // sugerir próximo mes contable
+    const { mes, anio } = sugerirProximoPeriodo(sel, vMes, vAnio);
+    setPagoMes(mes); setPagoAnio(anio);
+    setTimeout(() => editRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  }, [sel]);
+
+  function sugerirProximoPeriodo(p, fallbackMes, fallbackAnio) {
+    if (p?.ultimo_mes && p?.ultimo_anio) {
+      const m = Number(p.ultimo_mes), a = Number(p.ultimo_anio);
+      const nm = m === 12 ? 1 : m + 1;
+      const na = m === 12 ? a + 1 : a;
+      return { mes: nm, anio: na };
+    }
+    if (p?.primer_mes && p?.primer_anio) return { mes: Number(p.primer_mes), anio: Number(p.primer_anio) };
+    return { mes: fallbackMes, anio: fallbackAnio };
+  }
+
+  async function listar() {
     try {
-      setLoading(true);
-      setErr("");
-
-      const [pRes, pgRes] = await Promise.all([
-        api.get("/prestamos"),
-        api.get("/pagos_prestamo").catch(() => ({ data: { ok: true, data: [] } })), // tolerante
-      ]);
-
-      const pItems = Array.isArray(pRes.data)
-        ? pRes.data
-        : pRes.data?.data || [];
-
-      const pgItems = Array.isArray(pgRes.data)
-        ? pgRes.data
-        : pgRes.data?.data || [];
-
-      setPrestamos(pItems);
-      setPagos(pgItems);
-
-      // si tengo un seleccionado, refresco su info editable
-      if (seleccionadoId) {
-        const found = pItems.find((x) => x.id === seleccionadoId);
-        if (found) fillEditForm(found);
-      }
+      setLoading(true); setErr("");
+      // Trae resumen (incluye total_pagado, deuda_restante, ultimo_mes/ultimo_anio)
+      const { data } = await api.get("/prestamos/resumen");
+      const arr = Array.isArray(data) ? data : (data?.data ?? []);
+      setItems(arr);
+      if (sel) setSel(arr.find(x => x.id === sel.id) || null);
     } catch (e) {
-      setErr(e?.response?.data?.detail || "No pude cargar préstamos.");
+      setErr(e?.response?.data?.detail || "No pude cargar préstamos");
     } finally {
       setLoading(false);
     }
-  };
+  }
 
-  useEffect(() => {
-    loadAll();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Oculta préstamos cuya vista (vMes/vAnio) esté antes del primer_mes/año
+  const itemsFiltrados = useMemo(() => {
+    return items.filter(p => {
+      if (!p.primer_mes || !p.primer_anio) return true;
+      return (vAnio > p.primer_anio) || (vAnio === p.primer_anio && vMes >= p.primer_mes);
+    });
+  }, [items, vMes, vAnio]);
 
-  // ----------------------------------
-  // Agregados calculados por préstamo
-  // total_pagado, deuda_restante, último pago (mes/año)
-  // ----------------------------------
-  const pagosPorPrestamo = useMemo(() => {
-    const map = new Map();
-    for (const p of pagos) {
-      const key = p.prestamo_id;
-      if (!map.has(key)) {
-        map.set(key, {
-          total_pagado: 0,
-          ultimo_mes: null,
-          ultimo_anio: null,
-        });
-      }
-      const item = map.get(key);
-      item.total_pagado += Number(p.monto_pagado || 0);
+  // Totales de la vista (usamos total_pagado/deuda_restante del resumen)
+  const totales = useMemo(() => ({
+    monto: itemsFiltrados.reduce((a,p)=>a + (Number(p.valor_cuota||0)*Number(p.cuotas_totales||0)), 0),
+    pagado: itemsFiltrados.reduce((a,p)=>a + Number(p.total_pagado||0), 0),
+    deuda: itemsFiltrados.reduce((a,p)=>a + Number(p.deuda_restante||0), 0),
+  }), [itemsFiltrados]);
 
-      // último pago por (anio, mes)
-      const ma = Number(p.anio_contable || 0);
-      const mm = Number(p.mes_contable || 0);
-      if (
-        item.ultimo_anio == null ||
-        ma > item.ultimo_anio ||
-        (ma === item.ultimo_anio && mm > (item.ultimo_mes || 0))
-      ) {
-        item.ultimo_anio = ma;
-        item.ultimo_mes = mm;
-      }
+  async function crear() {
+    if (!nuevo.nombre || !nuevo.valor_cuota || !nuevo.cuotas_totales) {
+      alert("Nombre, valor cuota y cuotas totales son obligatorios.");
+      return;
     }
-    return map;
-  }, [pagos]);
-
-  const prestamosConTotales = useMemo(() => {
-    return prestamos.map((r) => {
-      const ext = pagosPorPrestamo.get(r.id) || {
-        total_pagado: 0,
-        ultimo_mes: null,
-        ultimo_anio: null,
-      };
-      const valor = Number(r.valor_cuota || 0);
-      const tot = Number(r.cuotas_totales || 0);
-      const totalTeorico = valor * tot;
-      const deuda_restante = Math.max(totalTeorico - ext.total_pagado, 0);
-
-      return {
-        ...r,
-        total_pagado: ext.total_pagado,
-        deuda_restante,
-        ultimo_mes: ext.ultimo_mes,
-        ultimo_anio: ext.ultimo_anio,
-      };
-    });
-  }, [prestamos, pagosPorPrestamo]);
-
-  // ----------------------------------
-  // UI helpers
-  // ----------------------------------
-  const cleanAlta = () => {
-    setForm({
-      nombre: "",
-      valor_cuota: "",
-      cuotas_totales: "",
-      primer_mes: "",
-      primer_anio: "",
-      dia_vencimiento: 10,
-      banco: "",
-    });
-  };
-
-  const fillEditForm = (p) => {
-    setEdit({
-      valor_cuota: p.valor_cuota || "",
-      cuotas_totales: p.cuotas_totales || "",
-      cuotas_pagadas: p.cuotas_pagadas || 0,
-      primer_mes: p.primer_mes || "",
-      primer_anio: p.primer_anio || "",
-      dia_vencimiento: p.dia_vencimiento || 10,
-      banco: p.banco || "",
-    });
-    // sugerir pago por defecto (mes/año del día)
-    const now = new Date();
-    setPay({
-      mes: now.getMonth() + 1,
-      anio: now.getFullYear(),
-      monto: p.valor_cuota || "",
-    });
-  };
-
-  const onSelectRow = (r) => {
-    setSeleccionado(r);
-    fillEditForm(r);
-  };
-
-  // ----------------------------------
-  // Acciones
-  // ----------------------------------
-  const guardarNuevo = async () => {
     try {
-      if (!form.nombre || !form.valor_cuota || !form.cuotas_totales) {
-        alert("Nombre, valor de la cuota y cuotas totales son obligatorios.");
-        return;
-      }
-      const payload = {
-        nombre: form.nombre,
-        valor_cuota: Number(form.valor_cuota),
-        cuotas_totales: Number(form.cuotas_totales),
-        primer_mes: form.primer_mes ? Number(form.primer_mes) : null,
-        primer_anio: form.primer_anio ? Number(form.primer_anio) : null,
-        dia_vencimiento: form.dia_vencimiento
-          ? Number(form.dia_vencimiento)
-          : 10,
-        banco: form.banco || null,
-      };
-      await api.post("/prestamos", payload);
-      cleanAlta();
-      await loadAll();
+      await api.post("/prestamos", {
+        nombre: nuevo.nombre,
+        valor_cuota: Number(nuevo.valor_cuota),
+        cuotas_totales: Number(nuevo.cuotas_totales),
+        banco: nuevo.banco || null,
+        primer_mes: nuevo.primer_mes ? Number(nuevo.primer_mes) : null,
+        primer_anio: nuevo.primer_anio ? Number(nuevo.primer_anio) : null,
+      });
+      setNuevo({ nombre:"", valor_cuota:"", cuotas_totales:"", primer_mes:"", primer_anio:"", banco:"" });
+      await listar();
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar el préstamo.");
+      alert(e?.response?.data?.detail || "No pude crear el préstamo");
     }
-  };
+  }
 
-  const guardarEdicion = async () => {
+  async function guardarCambios() {
+    if (!sel) return;
     try {
-      if (!seleccionadoId) return;
-      const payload = {
-        nombre: seleccionado.nombre, // si quieres permitir editar nombre, añade un input
-        valor_cuota: Number(edit.valor_cuota || 0),
-        cuotas_totales: Number(edit.cuotas_totales || 0),
-        cuotas_pagadas: Number(edit.cuotas_pagadas || 0),
+      await api.put(`/prestamos/${sel.id}`, {
+        nombre: sel.nombre, // mantenemos nombre
+        valor_cuota: edit.valor_cuota ? Number(edit.valor_cuota) : null,
+        cuotas_totales: edit.cuotas_totales ? Number(edit.cuotas_totales) : null,
         primer_mes: edit.primer_mes ? Number(edit.primer_mes) : null,
         primer_anio: edit.primer_anio ? Number(edit.primer_anio) : null,
-        dia_vencimiento: edit.dia_vencimiento
-          ? Number(edit.dia_vencimiento)
-          : 10,
-        banco: edit.banco || null,
-      };
-      await api.put(`/prestamos/${seleccionadoId}`, payload);
-      await loadAll();
-    } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar los cambios.");
-    }
-  };
-
-  const eliminarPrestamo = async () => {
-    try {
-      if (!seleccionadoId) return;
-      if (!confirm("¿Eliminar este préstamo?")) return;
-      await api.delete(`/prestamos/${seleccionadoId}`);
-      setSeleccionado(null);
-      await loadAll();
-    } catch (e) {
-      alert(e?.response?.data?.detail || "No pude eliminar el préstamo.");
-    }
-  };
-
-  const marcarPago = async () => {
-    try {
-      if (!seleccionadoId) return;
-      if (!pay.mes || !pay.anio || !pay.monto) {
-        alert("Mes, año y monto son obligatorios.");
-        return;
-      }
-      await api.post("/pagos_prestamo", {
-        prestamo_id: seleccionadoId,
-        mes_contable: Number(pay.mes),
-        anio_contable: Number(pay.anio),
-        monto_pagado: Number(pay.monto),
-        fecha_pago: new Date().toISOString().slice(0, 10),
+        banco: edit.banco || null
       });
-      await loadAll();
+      await listar();
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude registrar el pago.");
+      alert(e?.response?.data?.detail || "No pude guardar cambios");
     }
-  };
+  }
 
-  // ----------------------------------
-  // Render
-  // ----------------------------------
+  // eliminar préstamo (y sus pagos)
+  async function eliminarPrestamo() {
+    if (!sel) return;
+    if (!confirm("¿Eliminar este préstamo y todos sus pagos?")) return;
+    try {
+      await api.delete(`/prestamos/${sel.id}`);
+      setSel(null);
+      await listar();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude eliminar el préstamo");
+    }
+  }
+
+  // Pago de cuota
+  async function marcarPago() {
+    if (!sel) return;
+    try {
+      await api.post(`/prestamos/${sel.id}/pagar`, {
+        mes_contable: Number(pagoMes),
+        anio_contable: Number(pagoAnio),
+        monto_pagado: pagoValor ? Number(pagoValor) : undefined, // si no envías, backend usa valor_cuota
+      });
+      await listar();
+    } catch (e) {
+      alert(e?.response?.data?.detail || "No pude registrar el pago");
+    }
+  }
+
   return (
     <AppShell
       title="Préstamos"
-      actions={
-        <button style={ui.btn} onClick={loadAll}>
-          Actualizar
-        </button>
-      }
+      actions={<button style={ui.btn} onClick={listar}>Actualizar</button>}
     >
-      {/* Alta */}
+      {/* Vista contable */}
       <div style={ui.card}>
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>➕ Agregar préstamo</div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr 1fr 1fr 1fr", gap: 10 }}>
-          <input
-            placeholder="Nombre"
-            value={form.nombre}
-            onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Valor de la cuota"
-            type="number"
-            value={form.valor_cuota}
-            onChange={(e) => setForm({ ...form, valor_cuota: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Cuotas totales"
-            type="number"
-            value={form.cuotas_totales}
-            onChange={(e) => setForm({ ...form, cuotas_totales: e.target.value })}
-            style={styles.input}
-          />
-          <select
-            value={form.primer_mes || ""}
-            onChange={(e) => setForm({ ...form, primer_mes: e.target.value })}
-            style={styles.input}
-          >
-            <option value="">Selecciona...</option>
-            {meses.map((m) => (
-              <option key={m} value={m}>{mesesNombres[m]}</option>
-            ))}
-          </select>
-          <input
-            placeholder="Primer año (opcional)"
-            type="number"
-            value={form.primer_anio}
-            onChange={(e) => setForm({ ...form, primer_anio: e.target.value })}
-            style={styles.input}
-          />
-          <input
-            placeholder="Banco (opcional)"
-            value={form.banco}
-            onChange={(e) => setForm({ ...form, banco: e.target.value })}
-            style={styles.input}
-          />
-        </div>
-
-        <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
-          <button style={ui.btn} onClick={guardarNuevo}>Guardar</button>
-          <button style={{ ...ui.btn, background: "#8899aa" }} onClick={cleanAlta}>
-            Limpiar
-          </button>
+        <div style={{ fontWeight:700, marginBottom:12 }}>📅 Vista contable</div>
+        <div style={{ display:"flex", gap:10, alignItems:"end" }}>
+          <L label="Mes">
+            <select value={vMes} onChange={e=>setVMes(Number(e.target.value))} style={styles.input}>
+              {Array.from({length:12},(_,i)=>i+1).map(m=>(
+                <option key={m} value={m}>{MESES[m]}</option>
+              ))}
+            </select>
+          </L>
+          <L label="Año">
+            <input type="number" value={vAnio} onChange={e=>setVAnio(Number(e.target.value))} style={styles.input}/>
+          </L>
+          <div style={{ opacity:.9, marginLeft: 8 }}>
+            Totales: <b>{fmtCLP(totales.deuda)}</b> deuda · pagado {fmtCLP(totales.pagado)} / total {fmtCLP(totales.monto)}
+          </div>
         </div>
       </div>
 
-      {/* Tabla de préstamos */}
+      {/* Crear préstamo */}
       <div style={ui.card}>
-        <div style={{ fontWeight: 700, marginBottom: 12 }}>📄 Préstamos</div>
+        <div style={{ fontWeight:700, marginBottom:12 }}>➕ Agregar préstamo</div>
+        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr 1fr 1fr 1fr 2fr auto auto", gap:10, alignItems:"end" }}>
+          <L label="Nombre">
+            <input value={nuevo.nombre} onChange={e=>setNuevo({...nuevo, nombre:e.target.value})} style={styles.input}/>
+          </L>
+          <L label="Valor cuota">
+            <input type="number" value={nuevo.valor_cuota} onChange={e=>setNuevo({...nuevo, valor_cuota:e.target.value})} style={styles.input}/>
+          </L>
+          <L label="Cuotas totales">
+            <input type="number" value={nuevo.cuotas_totales} onChange={e=>setNuevo({...nuevo, cuotas_totales:e.target.value})} style={styles.input}/>
+          </L>
+          <L label="Mes inicial">
+            <select value={nuevo.primer_mes} onChange={e=>setNuevo({...nuevo, primer_mes:e.target.value})} style={styles.input}>
+              <option value="">—</option>
+              {Array.from({length:12},(_,i)=>i+1).map(m=> <option key={m} value={m}>{MESES[m]}</option>)}
+            </select>
+          </L>
+          <L label="Primer año">
+            <input type="number" value={nuevo.primer_anio} onChange={e=>setNuevo({...nuevo, primer_anio:e.target.value})} style={styles.input}/>
+          </L>
+          <L label="Banco (opcional)">
+            <input value={nuevo.banco} onChange={e=>setNuevo({...nuevo, banco:e.target.value})} style={styles.input}/>
+          </L>
+          <button style={ui.btn} onClick={crear}>Guardar</button>
+          <button style={{ ...ui.btn, background:"#6c757d" }} onClick={()=>setNuevo({ nombre:"", valor_cuota:"", cuotas_totales:"", primer_mes:"", primer_anio:"", banco:"" })}>Limpiar</button>
+        </div>
+      </div>
+
+      {/* Lista */}
+      <div style={ui.card}>
+        <div style={{ fontWeight:700, marginBottom:12 }}>📄 Préstamos</div>
         {loading ? (
-          <div>Cargando...</div>
+          <div>Cargando…</div>
         ) : err ? (
           <div style={styles.error}>{err}</div>
-        ) : prestamosConTotales.length === 0 ? (
-          <div style={{ opacity: 0.8 }}>No hay préstamos.</div>
+        ) : itemsFiltrados.length === 0 ? (
+          <div style={{ opacity:.8 }}>No hay préstamos para la vista {MESES[vMes]} {vAnio}.</div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={styles.table}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>ID</th>
-                  <th style={styles.th}>Nombre</th>
-                  <th style={styles.th}>Valor cuota</th>
-                  <th style={styles.th}>Cuotas totales</th>
-                  <th style={styles.th}>Total pagado</th>
-                  <th style={styles.th}>Deuda restante</th>
-                  <th style={styles.th}>Último pago</th>
-                </tr>
-              </thead>
-              <tbody>
-                {prestamosConTotales.map((r) => {
-                  const isSel = r.id === seleccionadoId;
-                  return (
-                    <tr
-                      key={r.id}
-                      onClick={() => onSelectRow(r)}
-                      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onSelectRow(r)}
-                      role="button"
-                      tabIndex={0}
-                      style={{
-                        cursor: "pointer",
-                        background: isSel ? "rgba(113,208,126,.15)" : "transparent",
-                      }}
-                    >
-                      <td style={styles.td}>{r.id}</td>
-                      <td style={styles.td}>{r.nombre}</td>
-                      <td style={styles.td}>{fmt.format(r.valor_cuota || 0)}</td>
-                      <td style={styles.td}>{r.cuotas_totales}</td>
-                      <td style={styles.td}>{fmt.format(r.total_pagado || 0)}</td>
-                      <td style={styles.td}>{fmt.format(r.deuda_restante || 0)}</td>
-                      <td style={styles.td}>
-                        {r.ultimo_mes ? `${mesesNombres[r.ultimo_mes]} ${r.ultimo_anio}` : "—"}
-                      </td>
+          <>
+            <div style={{ overflowX:"auto" }}>
+              <div style={{ maxHeight:"50vh", overflowY:"auto", border:"1px solid #1f2a44", borderRadius:12 }}>
+                <table style={{ width:"100%", borderCollapse:"collapse" }}>
+                  <thead>
+                    <tr style={{ position:"sticky", top:0, background:"#0e1626", zIndex:1 }}>
+                      <th style={styles.th}>ID</th>
+                      <th style={styles.th}>Nombre</th>
+                      <th style={styles.th}>Valor cuota</th>
+                      <th style={styles.th}>Cuotas totales</th>
+                      <th style={styles.th}>Cuotas pagadas</th>
+                      <th style={styles.th}>Total pagado</th>
+                      <th style={styles.th}>Deuda restante</th>
+                      <th style={styles.th}>Último pago</th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                  </thead>
+                  <tbody>
+                    {itemsFiltrados.map(p => {
+                      const selected = sel?.id === p.id;
+                      return (
+                        <tr key={p.id} onClick={()=>setSel(p)} style={{ ...styles.tr, background: selected ? "#1a253a" : "transparent" }}>
+                          <td style={styles.td}>{p.id}</td>
+                          <td style={styles.td}>{p.nombre}{p.banco ? ` — ${p.banco}` : ""}</td>
+                          <td style={styles.td}>{fmtCLP(p.valor_cuota)}</td>
+                          <td style={styles.td}>{p.cuotas_totales}</td>
+                          <td style={styles.td}>{p.cuotas_pagadas ?? 0}</td>
+                          <td style={styles.td}>{fmtCLP(p.total_pagado || 0)}</td>
+                          <td style={styles.td}>{fmtCLP(p.deuda_restante || 0)}</td>
+                          <td style={styles.td}>
+                            {p.ultimo_mes && p.ultimo_anio ? `${MESES[p.ultimo_mes]} ${p.ultimo_anio}` : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {!sel && <div style={{ marginTop:10, opacity:.7, fontSize:13 }}>
+              Tip: clic en una fila para editar términos o registrar pago.
+            </div>}
+          </>
         )}
       </div>
 
-      {/* Panel de acciones del seleccionado */}
-      {seleccionado && (
-        <div style={ui.card}>
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>
-            ✏️ Editar — <span style={ui.badge}>ID {seleccionado.id} · {seleccionado.nombre}</span>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr 1fr", gap: 10 }}>
-            <input
-              placeholder="Valor cuota"
-              type="number"
-              value={edit.valor_cuota}
-              onChange={(e) => setEdit({ ...edit, valor_cuota: e.target.value })}
-              style={styles.input}
-            />
-            <input
-              placeholder="Cuotas totales"
-              type="number"
-              value={edit.cuotas_totales}
-              onChange={(e) => setEdit({ ...edit, cuotas_totales: e.target.value })}
-              style={styles.input}
-            />
-            <input
-              placeholder="Cuotas pagadas"
-              type="number"
-              value={edit.cuotas_pagadas}
-              onChange={(e) => setEdit({ ...edit, cuotas_pagadas: e.target.value })}
-              style={styles.input}
-            />
-            <select
-              value={edit.primer_mes || ""}
-              onChange={(e) => setEdit({ ...edit, primer_mes: e.target.value })}
-              style={styles.input}
-            >
-              <option value="">Selecciona...</option>
-              {meses.map((m) => (
-                <option key={m} value={m}>{mesesNombres[m]}</option>
-              ))}
-            </select>
-            <input
-              placeholder="Primer año"
-              type="number"
-              value={edit.primer_anio}
-              onChange={(e) => setEdit({ ...edit, primer_anio: e.target.value })}
-              style={styles.input}
-            />
-            <input
-              placeholder="Banco (opcional)"
-              value={edit.banco}
-              onChange={(e) => setEdit({ ...edit, banco: e.target.value })}
-              style={styles.input}
-            />
-          </div>
-
-          <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
-            <button style={ui.btn} onClick={guardarEdicion}>Guardar cambios</button>
-            <button style={{ ...ui.btn, background: "#ff3b30", color: "#fff" }} onClick={eliminarPrestamo}>
-              Eliminar
+      {/* Panel de edición / pago — solo con selección */}
+      {sel && (
+        <div style={ui.card} ref={editRef}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12 }}>
+            <div style={{ fontWeight:700 }}>✏️ Editar</div>
+            <span style={{ fontSize:12, background:"#0e1626", padding:"4px 8px", borderRadius:6 }}>
+              ID {sel.id} — {sel.nombre}
+            </span>
+            <button onClick={()=>setSel(null)} style={{ marginLeft:"auto", textDecoration:"underline", opacity:.8 }}>
+              Limpiar selección
             </button>
           </div>
 
-          <hr style={{ borderColor: "#1f2a44", margin: "18px 0" }} />
+          {/* Añadimos etiquetas: */}
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr 2fr auto auto", gap:10, alignItems:"end" }}>
+            <L label="Valor cuota">
+              <input
+                type="number"
+                value={edit.valor_cuota}
+                onChange={e=>setEdit({...edit, valor_cuota:e.target.value})}
+                style={styles.input}
+              />
+            </L>
+            <L label="Cuotas totales">
+              <input
+                type="number"
+                value={edit.cuotas_totales}
+                onChange={e=>setEdit({...edit, cuotas_totales:e.target.value})}
+                style={styles.input}
+              />
+            </L>
+            <L label="Mes inicial">
+              <select
+                value={edit.primer_mes || ""}
+                onChange={e=>setEdit({...edit, primer_mes:e.target.value})}
+                style={styles.input}
+              >
+                <option value="">—</option>
+                {Array.from({length:12},(_,i)=>i+1).map(m=> <option key={m} value={m}>{MESES[m]}</option>)}
+              </select>
+            </L>
+            <L label="Primer año">
+              <input
+                type="number"
+                value={edit.primer_anio || ""}
+                onChange={e=>setEdit({...edit, primer_anio:e.target.value})}
+                style={styles.input}
+              />
+            </L>
+            <L label="Banco (opcional)">
+              <input
+                value={edit.banco || ""}
+                onChange={e=>setEdit({...edit, banco:e.target.value})}
+                style={styles.input}
+              />
+            </L>
+            <button onClick={guardarCambios} style={ui.btn}>Guardar cambios</button>
+            <button onClick={eliminarPrestamo} style={{ ...ui.btn, background:"#ff3b30" }}>Eliminar</button>
+          </div>
 
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>💳 Marcar pago</div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              value={pay.mes || ""}
-              onChange={(e) => setPay({ ...pay, mes: Number(e.target.value) })}
-              style={styles.input}
-            >
-              <option value="">Mes</option>
-              {meses.map((m) => (
-                <option key={m} value={m}>{mesesNombres[m]}</option>
-              ))}
-            </select>
-            <input
-              placeholder="Año"
-              type="number"
-              value={pay.anio}
-              onChange={(e) => setPay({ ...pay, anio: Number(e.target.value) })}
-              style={styles.input}
-            />
-            <input
-              placeholder="Monto"
-              type="number"
-              value={pay.monto}
-              onChange={(e) => setPay({ ...pay, monto: e.target.value })}
-              style={styles.input}
-            />
-            <button style={ui.btn} onClick={marcarPago}>
-              Marcar pago ({fmt.format(Number(pay.monto || 0))})
-            </button>
+          <div style={{ marginTop:16 }}>
+            <div style={{ fontWeight:700, marginBottom:8 }}>🧾 Registrar pago de cuota</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr auto", gap:10, alignItems:"end" }}>
+              <L label="Mes contable">
+                <select value={pagoMes} onChange={e=>setPagoMes(Number(e.target.value))} style={styles.input}>
+                  {Array.from({length:12},(_,i)=>i+1).map(m=> <option key={m} value={m}>{MESES[m]}</option>)}
+                </select>
+              </L>
+              <L label="Año contable">
+                <input type="number" value={pagoAnio} onChange={e=>setPagoAnio(Number(e.target.value))} style={styles.input}/>
+              </L>
+              <L label="Monto pagado (opcional)">
+                <input type="number" value={pagoValor} onChange={e=>setPagoValor(e.target.value)} style={styles.input}/>
+              </L>
+              <button type="button" onClick={marcarPago} style={{ ...ui.btn, background:"#1e90ff" }}>
+                Marcar cuota como pagada ({fmtCLP(pagoValor || sel.valor_cuota)})
+              </button>
+            </div>
+            <div style={{ marginTop:8, fontSize:12, opacity:.75 }}>
+              Último pago: {sel.ultimo_mes && sel.ultimo_anio ? `${MESES[sel.ultimo_mes]} ${sel.ultimo_anio}` : "—"} ·
+              Pagado {fmtCLP(sel.total_pagado || 0)} / Total {fmtCLP((sel.valor_cuota||0) * (sel.cuotas_totales||0))} · Deuda {fmtCLP(sel.deuda_restante || 0)}
+            </div>
           </div>
         </div>
       )}
@@ -492,30 +372,9 @@ export default function Prestamos() {
 }
 
 const styles = {
-  input: {
-    padding: "8px 10px",
-    borderRadius: 8,
-    border: "1px solid #23304a",
-    background: "#0e1626",
-    color: "#e6f0ff",
-  },
-  table: { width: "100%", borderCollapse: "collapse" },
-  th: {
-    textAlign: "left",
-    padding: "10px 8px",
-    borderBottom: "1px solid #1f2a44",
-    whiteSpace: "nowrap",
-    fontWeight: 700,
-  },
-  td: {
-    padding: "8px",
-    borderBottom: "1px solid #1f2a44",
-    whiteSpace: "nowrap",
-  },
-  error: {
-    background: "#ff3b30",
-    color: "#fff",
-    padding: "8px 10px",
-    borderRadius: 8,
-  },
+  input: { padding:"8px 10px", borderRadius:8, border:"1px solid #23304a", background:"#0e1626", color:"#e6f0ff" },
+  th: { textAlign:"left", padding:"10px 8px", borderBottom:"1px solid #1f2a44", whiteSpace:"nowrap" },
+  td: { padding:"8px", borderBottom:"1px solid #1f2a44", whiteSpace:"nowrap" },
+  tr: { cursor:"pointer" },
+  error: { background:"#ff3b30", color:"#fff", padding:"8px 10px", borderRadius:8 },
 };
