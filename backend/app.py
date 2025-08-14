@@ -2,6 +2,8 @@
 from datetime import date
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
+from fastapi import FastAPI
+from pagos import router as pagos_router
 
 import os
 import pathlib

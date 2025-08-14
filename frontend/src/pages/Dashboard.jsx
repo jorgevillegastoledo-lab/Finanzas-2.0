@@ -21,7 +21,7 @@ const fmtCLP = (n) =>
 // Helpers
 function lastNMonths(mes, anio, n = 6) {
   const out = [];
-  let m = mes, y = anio;
+  let m = Number(mes), y = Number(anio);
   for (let i = 0; i < n; i++) {
     out.unshift({ mes: m, anio: y }); // más antiguo a la izquierda
     m--;
@@ -31,49 +31,21 @@ function lastNMonths(mes, anio, n = 6) {
 }
 
 export default function Dashboard() {
-  // Filtros (por defecto mes/año actuales)
+  // Filtros (como string para inputs)
   const [mes, setMes]   = useState(String(MES_ACTUAL));
   const [anio, setAnio] = useState(String(ANIO_ACTUAL));
 
   // Datos
   const [gastos, setGastos] = useState([]);
   const [facturas, setFacturas] = useState([]);
-  const [prestamos, setPrestamos] = useState([]);
   const [sueldo, setSueldo] = useState(0);
 
+  const [cuotasVigentes, setCuotasVigentes] = useState(0); // monto
   const [serie6m, setSerie6m] = useState([]); // [{label, total}]
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // Totales de gastos
-  const totalGastos = useMemo(() =>
-    gastos.reduce((a, g) => a + Number(g.monto || 0), 0), [gastos]);
-
-  const totalGastosPagados = useMemo(() =>
-    gastos.filter(g => g.pagado).reduce((a, g) => a + Number(g.monto || 0), 0), [gastos]);
-
-  const totalGastosPend = totalGastos - totalGastosPagados;
-
-  // Totales de facturas (tarjetas)
-  const totalFacturas = useMemo(() =>
-    facturas.reduce((a, f) => a + Number(f.total || 0), 0), [facturas]);
-
-  const totalFacturasPagadas = useMemo(() =>
-    facturas.filter(f => f.pagada).reduce((a, f) => a + Number(f.total || 0), 0), [facturas]);
-
-  const totalFacturasPend = totalFacturas - totalFacturasPagadas;
-
-  // Préstamos: cuota mensual estimada (préstamos activos)
-  const cuotaPrestamosMes = useMemo(() => {
-    const activos = prestamos.filter(p =>
-      Number(p.cuotas_pagadas ?? 0) < Number(p.cuotas_totales ?? 0)
-    );
-    return activos.reduce((a, p) => a + Number(p.valor_cuota || 0), 0);
-  }, [prestamos]);
-
-  // “Sueldo disponible” simplificado
-  const sueldoDisponible = Math.max(0, Number(sueldo || 0) - (totalGastosPend + totalFacturasPend + cuotaPrestamosMes));
-
+  // --- CARGA PRINCIPAL ---
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -87,24 +59,35 @@ export default function Dashboard() {
 
     try {
       // 1) Cargas principales (en paralelo, tolerando fallos)
-      const [rg, rf, rp, rs] = await Promise.allSettled([
+      const [rg, rf, rcv, rpp, rs] = await Promise.allSettled([
         api.get("/gastos", { params: q }),
-        api.get("/facturas", { params: q }),
-        api.get("/prestamos"),            // prestamos general
-        api.get("/sueldos", { params: q })// si no existe, se ignora
+        api.get("/facturacion-tarjetas", { params: q }),
+        api.get("/prestamos/cuotas-vigentes", { params: q }),                            // preferido
+        api.get("/pagos-prestamo", { params: { mes_contable: q.mes, anio_contable: q.anio } }), // fallback
+        api.get("/sueldos", { params: q }) // opcional
       ]);
 
       // Gastos
       const dG = rg.status === "fulfilled" ? rg.value.data : [];
       setGastos(Array.isArray(dG) ? dG : (dG?.data ?? []));
 
-      // Facturas
+      // Facturas (facturación de tarjetas)
       const dF = rf.status === "fulfilled" ? rf.value.data : [];
       setFacturas(Array.isArray(dF) ? dF : (dF?.data ?? []));
 
-      // Préstamos
-      const dP = rp.status === "fulfilled" ? rp.value.data : [];
-      setPrestamos(Array.isArray(dP) ? dP : (dP?.data ?? []));
+      // Cuotas vigentes del mes
+      let cuotasMonto = 0;
+      if (rcv.status === "fulfilled") {
+        const cv = rcv.value.data;
+        // esperable: { monto_total: number }
+        if (cv && typeof cv === "object") cuotasMonto = Number(cv.monto_total || 0);
+      }
+      if (!cuotasMonto && rpp.status === "fulfilled") {
+        const pagos = rpp.value.data;
+        const arr = Array.isArray(pagos) ? pagos : (pagos?.data ?? []);
+        cuotasMonto = arr.reduce((acc, p) => acc + Number(p.monto ?? p.valor_cuota ?? 0), 0);
+      }
+      setCuotasVigentes(cuotasMonto);
 
       // Sueldo (opcional)
       let sueldoMes = 0;
@@ -147,8 +130,38 @@ export default function Dashboard() {
     setTimeout(loadAll, 0);
   }
 
+  // --- CÁLCULOS ---
+  // Gastos separados por forma de pago
+  const sumGastos = useMemo(() => {
+    let efectivoDebito = 0, credito = 0;
+    for (const g of gastos) {
+      const m = Number(g.monto || 0);
+      const fp = String(g.forma_pago || "EFECTIVO").toUpperCase();
+      if (fp === "CREDITO") credito += m;
+      else efectivoDebito += m;
+    }
+    return { efectivoDebito, credito };
+  }, [gastos]);
+
+  // Facturación de tarjetas total del mes
+  const totalFacturacion = useMemo(() => {
+    return (Array.isArray(facturas) ? facturas : []).reduce(
+      (acc, f) => acc + Number(f.monto ?? f.total ?? f.total_facturado ?? 0),
+      0
+    );
+  }, [facturas]);
+
+  // Totales solicitados
+  const totalMensualConTodo = useMemo(() => {
+    return sumGastos.efectivoDebito + sumGastos.credito + cuotasVigentes + totalFacturacion;
+  }, [sumGastos, cuotasVigentes, totalFacturacion]);
+
+  const totalMensualSinCredito = useMemo(() => {
+    return sumGastos.efectivoDebito + cuotasVigentes + totalFacturacion;
+  }, [sumGastos, cuotasVigentes, totalFacturacion]);
+
   // Para el minigráfico
-  const maxBar = Math.max(...serie6m.map(s => s.total), 1);
+  const maxBar = Math.max(...(serie6m.map(s => s.total)), 1);
 
   return (
     <AppShell
@@ -176,51 +189,49 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Métricas */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16 }}>
+      {/* KPIs principales alineados a tu lógica */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Total del mes</div>
-          <div style={styles.kpiValue}>{fmtCLP(totalGastos)}</div>
-          <div style={styles.kpiSub}>Gastos (todos)</div>
+          <div style={styles.kpiTitle}>Gastos Efectivo/Débito (mes)</div>
+          <div style={styles.kpiValue}>{fmtCLP(sumGastos.efectivoDebito)}</div>
+          <div style={styles.kpiSub}>Solo gastos marcados EFECTIVO o DÉBITO</div>
         </div>
 
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Gastos pagados (mes)</div>
-          <div style={styles.kpiValue}>{fmtCLP(totalGastosPagados)}</div>
-          <div style={styles.kpiSub}>Marcados como pagados</div>
+          <div style={styles.kpiTitle}>Gastos a Crédito (mes)</div>
+          <div style={{ ...styles.kpiValue, color: "#7c3aed" }}>{fmtCLP(sumGastos.credito)}</div>
+          <div style={styles.kpiSub}>Gastos marcados CRÉDITO</div>
         </div>
 
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Por pagar (mes)</div>
-          <div style={styles.kpiValue}>{fmtCLP(totalGastosPend)}</div>
-          <div style={styles.kpiSub}>Gastos no pagados</div>
-        </div>
-
-        <div style={ui.card}>
-          <div style={styles.kpiTitle}>Sueldo disponible</div>
-          <div style={styles.kpiValue}>{fmtCLP(sueldoDisponible)}</div>
-          <div style={styles.kpiSub}>
-            Sueldo − (pend. gastos + facturas + cuotas préstamos)
-          </div>
+          <div style={styles.kpiTitle}>Facturación tarjetas (mes)</div>
+          <div style={styles.kpiValue}>{fmtCLP(totalFacturacion)}</div>
+          <div style={styles.kpiSub}>Total facturado en tarjetas</div>
         </div>
       </div>
 
-      {/* Tarjetas / Préstamos */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginTop: 16 }}>
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Facturado tarjetas (mes)</div>
-          <div style={styles.kpiValue}>{fmtCLP(totalFacturas)}</div>
-          <div style={styles.kpiSub}>
-            Pagado: {fmtCLP(totalFacturasPagadas)} &nbsp;·&nbsp; Pendiente: {fmtCLP(totalFacturasPend)}
-          </div>
+          <div style={styles.kpiTitle}>Cuotas préstamos (vigentes mes)</div>
+          <div style={styles.kpiValue}>{fmtCLP(cuotasVigentes)}</div>
+          <div style={styles.kpiSub}>Solo del mes seleccionado (no futuras)</div>
         </div>
 
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Cuota préstamos (estimada mes)</div>
-          <div style={styles.kpiValue}>{fmtCLP(cuotaPrestamosMes)}</div>
-          <div style={styles.kpiSub}>Suma de valor_cuota de préstamos activos</div>
+          <div style={styles.kpiTitle}>Total mensual (con todo)</div>
+          <div style={styles.kpiValue}>{fmtCLP(totalMensualConTodo)}</div>
+          <div style={styles.kpiSub}>Efectivo/Débito + Crédito + Cuotas + Facturación</div>
         </div>
 
+        <div style={ui.card}>
+          <div style={styles.kpiTitle}>Total mensual (sin gastos a crédito)</div>
+          <div style={{ ...styles.kpiValue, color: "#d90429" }}>{fmtCLP(totalMensualSinCredito)}</div>
+          <div style={styles.kpiSub}>Excluye gastos marcados CRÉDITO</div>
+        </div>
+      </div>
+
+      {/* Sueldo opcional */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginTop: 16 }}>
         <div style={ui.card}>
           <div style={styles.kpiTitle}>Sueldo del mes</div>
           <div style={styles.kpiValue}>{fmtCLP(sueldo)}</div>
@@ -249,16 +260,16 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Lista rápida — facturas pendientes */}
+      {/* Lista rápida — facturas pendientes del mes */}
       <div style={{ ...ui.card, marginTop: 16 }}>
         <div style={{ fontWeight: 700, marginBottom: 12 }}>Pendientes de tarjetas (mes)</div>
-        {facturas.filter(f => !f.pagada).length === 0 ? (
+        {(facturas.filter(f => !f.pagado)).length === 0 ? (
           <div style={{ opacity: 0.7 }}>No hay facturas pendientes.</div>
         ) : (
           <ul style={{ margin: 0, paddingLeft: 16 }}>
-            {facturas.filter(f => !f.pagada).map((f) => (
+            {facturas.filter(f => !f.pagado).map((f) => (
               <li key={f.id} style={{ marginBottom: 4 }}>
-                {(f.tarjeta_nombre || f.tarjeta || `Tarjeta ${f.tarjeta_id ?? ""}`)} — <b>{fmtCLP(f.total)}</b>
+                {(f.tarjeta_nombre || f.tarjeta || f.banco || `Tarjeta ${f.tarjeta_id ?? ""}`)} — <b>{fmtCLP(f.monto ?? f.total ?? f.total_facturado ?? 0)}</b>
               </li>
             ))}
           </ul>
@@ -296,4 +307,3 @@ const styles = {
   kpiValue: { fontWeight: 800, fontSize: 22, lineHeight: 1 },
   kpiSub:   { fontSize: 12, opacity: 0.75, marginTop: 4 },
 };
-
