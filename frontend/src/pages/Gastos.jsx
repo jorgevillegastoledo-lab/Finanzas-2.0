@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
+import { useToast, useConfirm } from "../ui/notifications";
 
 const MESES = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
@@ -62,7 +63,12 @@ async function crearPagoGastoAPI(payload) {
   }
 }
 
+// ---------------------------------------------
+
 export default function Gastos() {
+  const { success, error, warning } = useToast();
+  const confirm = useConfirm();
+
   // --- Estado de lista / filtros ---
   const [gastos, setGastos] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -173,8 +179,14 @@ export default function Gastos() {
   // --- Crear ---
   async function crearGasto(e) {
     e?.preventDefault?.();
-    if (!nuevo.nombre || !nuevo.monto) return alert("Nombre y monto son obligatorios.");
-    if (nuevo.fp_ui === FP.CREDITO && !nuevo.tarjeta_id) return alert("Selecciona una tarjeta para los gastos a crédito.");
+    if (!nuevo.nombre || !nuevo.monto) {
+      warning("Nombre y monto son obligatorios.");
+      return;
+    }
+    if (nuevo.fp_ui === FP.CREDITO && !nuevo.tarjeta_id) {
+      warning("Selecciona una tarjeta para los gastos a crédito.");
+      return;
+    }
 
     try {
       setSavingNew(true);
@@ -193,15 +205,19 @@ export default function Gastos() {
         es_recurrente: false, fp_ui: FP.EFECTIVO, tarjeta_id: "",
       });
       await loadGastos();
+      success("Gasto creado");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar el gasto");
+      error({ title: "No pude guardar el gasto", description: e?.response?.data?.detail || String(e) });
     } finally { setSavingNew(false); }
   }
 
   // --- Editar / eliminar / marcar pagado ---
   async function guardarEdicion() {
     if (!sel) return;
-    if (edit.fp_ui === FP.CREDITO && !edit.tarjeta_id) return alert("Selecciona una tarjeta para los gastos a crédito.");
+    if (edit.fp_ui === FP.CREDITO && !edit.tarjeta_id) {
+      warning("Selecciona una tarjeta para los gastos a crédito.");
+      return;
+    }
     try {
       await api.put(`/gastos/${sel.id}`, {
         nombre: edit.nombre,
@@ -214,20 +230,29 @@ export default function Gastos() {
         tarjeta_id: edit.fp_ui === FP.CREDITO ? Number(edit.tarjeta_id) : null, // ← DB
       });
       await loadGastos();
+      success("Cambios guardados");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar cambios");
+      error({ title: "No pude guardar cambios", description: e?.response?.data?.detail || String(e) });
     }
   }
 
   async function eliminarSeleccionado() {
     if (!sel) return;
-    if (!confirm("¿Eliminar gasto?")) return;
+    const ok = await confirm({
+      title: "¿Eliminar gasto?",
+      message: "Esta acción no se puede deshacer.",
+      confirmText: "Eliminar",
+      tone: "danger",
+    });
+    if (!ok) return;
+
     try {
       await api.delete(`/gastos/${sel.id}`);
       setSel(null);
       await loadGastos();
+      success("Gasto eliminado");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude eliminar");
+      error({ title: "No pude eliminar", description: e?.response?.data?.detail || String(e) });
     }
   }
 
@@ -244,7 +269,7 @@ export default function Gastos() {
             : null;
 
         if (metodo === "credito" && !tarjetaId) {
-          alert("Selecciona una tarjeta para registrar el pago con crédito.");
+          warning("Selecciona una tarjeta para registrar el pago con crédito.");
           return;
         }
 
@@ -258,10 +283,10 @@ export default function Gastos() {
 
         const ok = await crearPagoGastoAPI(payloadPay);
         if (!ok) {
-          alert("No pude registrar el pago. Revisa que esté activo POST /gastos/:id/pagar.");
+          error("No pude registrar el pago. Revisa que esté activo POST /gastos/:id/pagar.");
           return;
         }
-
+        success("Pago registrado");
         // Ya no hacemos PUT /gastos/:id porque /gastos/:id/pagar lo dejó pagado.
       } else {
         // Deshacer pagado: solo bajamos el flag (conserva datos de tarjeta si tenía)
@@ -275,11 +300,12 @@ export default function Gastos() {
           con_tarjeta: isCredito(sel),
           tarjeta_id: isCredito(sel) ? Number(sel.tarjeta_id) : null,
         });
+        success("Se deshizo el pago");
       }
 
       await loadGastos();
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude actualizar el estado de pago");
+      error({ title: "No pude actualizar el estado de pago", description: e?.response?.data?.detail || String(e) });
     }
   }
 

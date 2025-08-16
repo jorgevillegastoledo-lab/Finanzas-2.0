@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
+import { useToast, useConfirm } from "../ui/notifications";
 
 const MESES = [
   "", "Enero","Febrero","Marzo","Abril","Mayo","Junio",
@@ -15,6 +16,8 @@ const ANIO_ACTUAL = hoy.getFullYear();
 const fmtCLP = (n) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(n || 0));
 
+const fmtError = (e) => e?.response?.data?.detail || e?.message || String(e);
+
 // Etiqueta arriba del campo
 const L = ({ label, children }) => (
   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -24,6 +27,9 @@ const L = ({ label, children }) => (
 );
 
 export default function FacturacionTarjetas() {
+  const { success, error, warning } = useToast();
+  const confirm = useConfirm();
+
   const [tarjetas, setTarjetas] = useState([]);
   const [facturas, setFacturas] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -96,8 +102,9 @@ export default function FacturacionTarjetas() {
         setSel(keep || null);
       }
     } catch (e) {
-      setErr(e?.response?.data?.detail || "No pude cargar facturas");
-      alert(e?.response?.data?.detail || "No pude cargar facturas");
+      const msg = fmtError(e) || "No pude cargar facturas";
+      setErr(msg);
+      error({ title: "Error al cargar", description: msg });
     } finally {
       setLoading(false);
     }
@@ -114,7 +121,7 @@ export default function FacturacionTarjetas() {
   async function crearFactura(e) {
     e?.preventDefault?.();
     if (!nuevo.tarjeta_id || !nuevo.total) {
-      alert("Tarjeta y total son obligatorios.");
+      warning("Tarjeta y total son obligatorios.");
       return;
     }
     try {
@@ -127,8 +134,9 @@ export default function FacturacionTarjetas() {
       });
       setNuevo({ tarjeta_id: "", mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL), total: "" });
       await loadFacturas();
+      success("Factura creada/actualizada");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar la factura");
+      error({ title: "No pude guardar la factura", description: fmtError(e) });
     } finally {
       setSavingNew(false);
     }
@@ -149,24 +157,33 @@ export default function FacturacionTarjetas() {
       } else {
         payload.fecha_pago = null;
       }
-      // Nota: si tu backend no tiene PUT /facturas/{id}, cambia esta línea por POST /facturas (upsert) según tu API.
       await api.put(`/facturas/${sel.id}`, payload);
       await loadFacturas();
+      success("Cambios guardados");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar cambios");
+      error({ title: "No pude guardar cambios", description: fmtError(e) });
     }
   }
 
   // --- Eliminar
   async function eliminarSeleccionada() {
     if (!sel) return;
-    if (!confirm("¿Eliminar factura?")) return;
+
+    const ok = await confirm({
+      title: "¿Eliminar factura?",
+      message: "Esta acción no se puede deshacer.",
+      confirmText: "Eliminar",
+      tone: "danger",
+    });
+    if (!ok) return;
+
     try {
       await api.delete(`/facturas/${sel.id}`);
       setSel(null);
       await loadFacturas();
+      success("Factura eliminada");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude eliminar");
+      error({ title: "No pude eliminar", description: fmtError(e) });
     }
   }
 
@@ -179,8 +196,9 @@ export default function FacturacionTarjetas() {
         fecha_pago: flag ? (edit.fecha_pago || null) : null,
       });
       await loadFacturas();
+      success(flag ? "Factura marcada como pagada" : "Pago deshecho");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude actualizar el estado de pago");
+      error({ title: "No pude actualizar el estado de pago", description: fmtError(e) });
     }
   }
 

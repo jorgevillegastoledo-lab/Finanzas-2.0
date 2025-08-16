@@ -1,9 +1,7 @@
 # app.py — Finanzas API (FastAPI + PostgreSQL) — Windows safe + CORS
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI
-from pagos import router as pagos_router
 
 import os
 import pathlib
@@ -28,10 +26,10 @@ for fname in ("pg_service.conf", "pgpass.conf"):
     if not p.exists():
         p.write_text("", encoding="utf-8")
 
-os.environ["PGSYSCONFDIR"] = str(SAFE_DIR)                  # buscar aquí pg_service.conf
+os.environ["PGSYSCONFDIR"] = str(SAFE_DIR)
 os.environ["PGSERVICEFILE"] = str(SAFE_DIR / "pg_service.conf")
 os.environ["PGPASSFILE"] = str(SAFE_DIR / "pgpass.conf")
-os.environ["PGSERVICE"] = ""                                # no usar 'service'
+os.environ["PGSERVICE"] = ""
 os.environ["PGCLIENTENCODING"] = "utf8"
 os.environ.pop("DATABASE_URL", None)
 
@@ -45,7 +43,6 @@ DEFAULT_HOST   = "localhost"
 DEFAULT_PORT   = 5432
 
 def get_conn():
-    """Crea una conexión nueva a PostgreSQL."""
     try:
         conn = psycopg2.connect(
             dbname=os.getenv("PGDATABASE", DEFAULT_DBNAME),
@@ -62,10 +59,9 @@ def get_conn():
         raise HTTPException(status_code=500, detail=f"No pude conectar a la base de datos: {e}")
 
 def _fix_json(rows: List[Dict[str, Any]]):
-    """Convierte Decimal/fecha a tipos serializables."""
     def f(v):
         if isinstance(v, Decimal): return float(v)
-        if isinstance(v, date):    return v.isoformat()
+        if isinstance(v, (date, datetime)): return v.isoformat()
         return v
     return [{k: f(v) for k, v in r.items()} for r in rows]
 
@@ -79,21 +75,35 @@ app.add_middleware(
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False,  # usamos headers/bearer, no cookies
+    allow_credentials=False,
 )
 
 # -------------------------------------------------------------------
-#  Utils
+#  Utils de esquema
 # -------------------------------------------------------------------
+NUMERIC_TYPES = {
+    "numeric", "decimal", "double precision", "real",
+    "integer", "bigint", "smallint"
+}
+
 def get_columns(conn, table: str) -> set:
-    """Obtiene columnas reales de una tabla (para inserts/updates tolerantes)."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = %s
+            WHERE table_schema='public' AND table_name=%s
         """, (table,))
         return {r[0] for r in cur.fetchall()}
+
+def get_column_type(conn, table: str, column: str) -> Optional[str]:
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name=%s AND column_name=%s
+        """, (table, column))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 # -------------------------------------------------------------------
 #  Modelos
@@ -125,7 +135,6 @@ class GastoIn(BaseModel):
     pagado: Optional[bool] = None
     tarjeta_id: Optional[int] = None
     cuotas: Optional[int] = 1
-    # si tu tabla los tiene, se respetan; si no, se ignoran
     tipo: Optional[str] = None
     con_tarjeta: Optional[bool] = None
     es_recurrente: Optional[bool] = None
@@ -161,24 +170,25 @@ class FacturaUpdate(BaseModel):
 class PagoPrestamoIn(BaseModel):
     mes_contable: int = Field(ge=1, le=12)
     anio_contable: int = Field(ge=2000, le=2100)
-    monto_pagado: Optional[float] = None   # si no llega, se usa valor_cuota del préstamo
+    monto_pagado: Optional[float] = None
+
+class GastoPagarIn(BaseModel):
+    fecha: Optional[date] = None
+    monto: Optional[float] = None
+    metodo: Optional[str] = None
+    tarjeta_id: Optional[int] = None
+    nota: Optional[str] = None
 
 # -----------------------------------------------------------
 #  Helpers ensure_* para tablas opcionales
 # -----------------------------------------------------------
 def ensure_recurrentes(mes: int, anio: int):
-    """
-    Clona a (mes, anio) los gastos marcados como es_recurrente=TRUE
-    desde el mes anterior. Evita duplicados por (nombre, mes, anio).
-    """
     try:
         prev_mes  = 12 if mes == 1 else mes - 1
         prev_anio = anio - 1 if mes == 1 else anio
-
         conn = get_conn()
         with conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
                 INSERT INTO gastos (
                     nombre, monto, con_tarjeta, tarjeta_id,
                     es_recurrente, mes, anio, pagado
@@ -196,28 +206,21 @@ def ensure_recurrentes(mes: int, anio: int):
                   AND g.mes  = %s
                   AND g.anio = %s
                   AND NOT EXISTS (
-                        SELECT 1
-                        FROM gastos t
-                        WHERE t.es_recurrente = TRUE
-                          AND t.nombre = g.nombre
-                          AND t.mes = %s
-                          AND t.anio = %s
+                      SELECT 1 FROM gastos t
+                      WHERE t.es_recurrente = TRUE
+                        AND t.nombre = g.nombre
+                        AND t.mes = %s AND t.anio = %s
                   );
-                """,
-                (mes, anio, prev_mes, prev_anio, mes, anio)
-            )
+            """, (mes, anio, prev_mes, prev_anio, mes, anio))
         conn.commit()
     except Exception:
-        if 'conn' in locals():
-            conn.rollback()
+        if 'conn' in locals(): conn.rollback()
         logging.getLogger("uvicorn.error").exception("ensure_recurrentes falló")
         raise
     finally:
-        if 'conn' in locals():
-            conn.close()
+        if 'conn' in locals(): conn.close()
 
 def ensure_facturas_table(conn):
-    """Crea/ajusta la tabla facturas (pagada/fecha_pago incluidos)."""
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS facturas (
@@ -237,7 +240,6 @@ def ensure_facturas_table(conn):
         cur.execute("ALTER TABLE facturas ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW();")
 
 def ensure_pagos_prestamo_table(conn):
-    """Usa 'valor_cuota' como en tu esquema actual."""
     with conn.cursor() as cur:
         cur.execute("""
             CREATE TABLE IF NOT EXISTS pagos_prestamo (
@@ -250,65 +252,97 @@ def ensure_pagos_prestamo_table(conn):
             );
         """)
 
-@app.post("/prestamos")
-def crear_prestamo(body: PrestamoIn):
-    try:
-        conn = get_conn()
-        cols_exist = get_columns(conn, "prestamos")
+def ensure_pagos_gasto_table(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS pagos_gasto (
+                id SERIAL PRIMARY KEY,
+                gasto_id INTEGER NOT NULL REFERENCES gastos(id),
+                fecha DATE NOT NULL DEFAULT CURRENT_DATE,
+                monto NUMERIC(14,2) NOT NULL,
+                metodo TEXT,
+                tarjeta_id INTEGER,
+                nota TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+        """)
 
-        data = {
-            "nombre": body.nombre,
-            "valor_cuota": body.valor_cuota,
-            "cuotas_totales": body.cuotas_totales,
-            "primer_mes": body.primer_mes,
-            "primer_anio": body.primer_anio,
-            "banco": body.banco,
-        }
-        # iniciales coherentes con el esquema
-        if "cuotas_pagadas" in cols_exist:
-            data["cuotas_pagadas"] = 0
-        if "monto_total" in cols_exist:
-            data["monto_total"] = body.valor_cuota * body.cuotas_totales
-        if "deuda_restante" in cols_exist:
-            data["deuda_restante"] = body.valor_cuota * body.cuotas_totales  # sin pagos aún
+# --- NUEVO: tarjeta_detalle --------------------------------------------
+def ensure_tarjeta_detalle_table(conn):
+    """
+    Crea la tabla tarjeta_detalle si no existe.
+    No asume índice único para permitir compatibilidad con tablas existentes.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tarjeta_detalle (
+                id SERIAL PRIMARY KEY,
+                tarjeta_id INTEGER NOT NULL REFERENCES tarjetas(id) ON DELETE CASCADE,
+                alias VARCHAR(100),
+                pan_last4 VARCHAR(4),
+                expiracion_mes SMALLINT,
+                expiracion_anio INTEGER,
+                fecha_entrega DATE,
+                red VARCHAR(20),
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+        """)
 
-        # manejar 'pagado' según tipo de columna real
-        if "pagado" in cols_exist:
-            col_type = get_column_type(conn, "prestamos", "pagado")
-            if col_type == "boolean":
-                data["pagado"] = False
-            else:
-                # numérico: usarlo como total_pagado inicial = 0
-                data["pagado"] = 0
+# -------------------------------------------------------------------
+#  Recompute de totales de préstamo
+# -------------------------------------------------------------------
+def recompute_prestamo_totales(conn, prestamo_id: int):
+    cols = get_columns(conn, "prestamos")
+    if not {"valor_cuota", "cuotas_totales"}.issubset(cols):
+        return
 
-        # si tienes columna 'total_pagado', iníciala a 0
-        if "total_pagado" in cols_exist:
-            data["total_pagado"] = 0
+    # Datos del préstamo
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT valor_cuota, cuotas_totales
+            FROM prestamos
+            WHERE id = %s
+        """, (prestamo_id,))
+        p = cur.fetchone()
+        if not p:
+            return
+        valor_cuota = float(p["valor_cuota"])
+        cuotas_tot  = int(p["cuotas_totales"])
 
-        # filtrar None y columnas inexistentes
-        data = {k: v for k, v in data.items() if k in cols_exist and v is not None}
+    # Pagos reales
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COALESCE(SUM(valor_cuota),0) AS total_pagado,
+                   COUNT(*) AS pagos
+            FROM pagos_prestamo
+            WHERE prestamo_id = %s
+        """, (prestamo_id,))
+        total_pagado, pagos = cur.fetchone()
 
-        columns = list(data.keys())
-        values = list(data.values())
-        placeholders = [sql.Placeholder() for _ in columns]
+    monto_total = valor_cuota * cuotas_tot
+    deuda = max(monto_total - float(total_pagado), 0)
 
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            q = sql.SQL("INSERT INTO {t} ({c}) VALUES ({p}) RETURNING *;").format(
-                t=sql.Identifier("prestamos"),
-                c=sql.SQL(", ").join(map(sql.Identifier, columns)),
-                p=sql.SQL(", ").join(placeholders),
-            )
-            cur.execute(q, values)
-            row = cur.fetchone()
+    sets = []
+    params = []
 
-        # sincronizar totales (por si hay columnas extra)
-        recompute_prestamo_totales(conn, row["id"])
-        conn.close()
-        return {"ok": True, "data": _fix_json([row])[0] if row else None}
-    except Exception as e:
-        logging.getLogger("uvicorn.error").exception("Error al crear préstamo")
-        raise HTTPException(status_code=500, detail=f"Error al crear préstamo: {e}")
+    if "monto_total" in cols:
+        sets.append("monto_total = %s"); params.append(monto_total)
+    if "deuda_restante" in cols:
+        sets.append("deuda_restante = %s"); params.append(deuda)
+    if "cuotas_pagadas" in cols:
+        sets.append("cuotas_pagadas = %s"); params.append(int(pagos))
+    if "pagado" in cols:
+        t = get_column_type(conn, "prestamos", "pagado")
+        if t and t.lower() == "boolean":
+            sets.append("pagado = %s"); params.append(int(pagos) >= cuotas_tot)
+        elif t and t.lower() in NUMERIC_TYPES:
+            sets.append("pagado = %s"); params.append(total_pagado)
 
+    if sets:
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE prestamos SET {', '.join(sets)} WHERE id = %s",
+                        params + [prestamo_id])
 
 # -------------------------------------------------------------------
 #  Endpoints base
@@ -339,31 +373,39 @@ def listar_prestamos():
 def crear_prestamo(body: PrestamoIn):
     try:
         conn = get_conn()
-        cols_exist = get_columns(conn, "prestamos")
+        cols = get_columns(conn, "prestamos")
+
         data = {
             "nombre": body.nombre,
             "valor_cuota": body.valor_cuota,
             "cuotas_totales": body.cuotas_totales,
-            "cuotas_pagadas": body.cuotas_pagadas,
+            "cuotas_pagadas": body.cuotas_pagadas or 0,
             "primer_mes": body.primer_mes,
             "primer_anio": body.primer_anio,
             "dia_vencimiento": body.dia_vencimiento,
             "banco": body.banco,
         }
-        data = {k: v for k, v in data.items() if k in cols_exist and v is not None}
+        data = {k: v for k, v in data.items() if k in cols and v is not None}
 
-        if "monto_total" in cols_exist:
+        # Montos derivados
+        if "monto_total" in cols:
             data["monto_total"] = body.valor_cuota * body.cuotas_totales
-        if "deuda_restante" in cols_exist:
-            pagadas = int(body.cuotas_pagadas or 0)
-            total_pagado = body.valor_cuota * pagadas
-            deuda = (body.valor_cuota * body.cuotas_totales) - total_pagado
+
+        # Manejar 'pagado' según tipo real
+        if "pagado" in cols:
+            t = get_column_type(conn, "prestamos", "pagado")
+            if t and t.lower() in NUMERIC_TYPES:
+                data["pagado"] = (body.valor_cuota * (body.cuotas_pagadas or 0))
+            elif t and t.lower() == "boolean":
+                data["pagado"] = (body.cuotas_pagadas or 0) >= body.cuotas_totales
+
+        if "deuda_restante" in cols:
+            cuotas_pag = int(body.cuotas_pagadas or 0)
+            deuda = (body.valor_cuota * body.cuotas_totales) - (body.valor_cuota * cuotas_pag)
             data["deuda_restante"] = max(deuda, 0)
-        if "pagado" in cols_exist:
-            data["pagado"] = (body.cuotas_pagadas or 0) >= body.cuotas_totales
 
         columns = list(data.keys())
-        values = list(data.values())
+        values  = list(data.values())
         placeholders = [sql.Placeholder() for _ in columns]
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -375,10 +417,10 @@ def crear_prestamo(body: PrestamoIn):
             cur.execute(q, values)
             row = cur.fetchone()
 
-        # sincroniza totales por si hay columnas extra
+        # Recalcula por seguridad (si cambia algo del esquema)
         recompute_prestamo_totales(conn, row["id"])
         conn.close()
-        return {"ok": True, "data": _fix_json([row])[0] if row else None}
+        return {"ok": True, "data": _fix_json([row])[0]}
     except Exception as e:
         logging.getLogger("uvicorn.error").exception("Error al crear préstamo")
         raise HTTPException(status_code=500, detail=f"Error al crear préstamo: {e}")
@@ -387,8 +429,8 @@ def crear_prestamo(body: PrestamoIn):
 def editar_prestamo(id: int, body: PrestamoIn):
     try:
         conn = get_conn()
-        cols_exist = get_columns(conn, "prestamos")
-        data = {k: v for k, v in body.dict().items() if k in cols_exist}
+        cols = get_columns(conn, "prestamos")
+        data = {k: v for k, v in body.dict().items() if k in cols}
         if not data:
             raise HTTPException(status_code=400, detail="No hay columnas válidas que actualizar.")
         sets = [sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder()) for k in data.keys()]
@@ -399,7 +441,7 @@ def editar_prestamo(id: int, body: PrestamoIn):
             cur.execute(q, list(data.values()) + [id])
             row = cur.fetchone()
 
-        # si cambiaste valor_cuota/cuotas_totales, recalcula totales
+        # Recalcular totales si cambiaron cuotas o valor_cuota
         recompute_prestamo_totales(conn, id)
         conn.close()
         if not row:
@@ -410,10 +452,6 @@ def editar_prestamo(id: int, body: PrestamoIn):
 
 @app.post("/prestamos/{id}/pagar")
 def marcar_pago_prestamo(id: int, body: PagoPrestamoIn):
-    """
-    Registra el pago en pagos_prestamo y sincroniza totales en 'prestamos'.
-    Si no llega monto_pagado, usa el valor_cuota actual del préstamo.
-    """
     try:
         conn = get_conn()
         ensure_pagos_prestamo_table(conn)
@@ -433,6 +471,7 @@ def marcar_pago_prestamo(id: int, body: PagoPrestamoIn):
                 VALUES (%s, %s, %s, %s);
             """, (id, body.mes_contable, body.anio_contable, monto))
 
+        # 👉 ahora todo se recalcula a partir de pagos_prestamo
         recompute_prestamo_totales(conn, id)
         conn.close()
         return {"ok": True}
@@ -442,7 +481,6 @@ def marcar_pago_prestamo(id: int, body: PagoPrestamoIn):
 
 @app.put("/prestamos/{id}/pagar")
 def marcar_pago_prestamo_put(id: int, body: PagoPrestamoIn):
-    """Alias PUT por si el frontend usa PUT en vez de POST."""
     return marcar_pago_prestamo(id, body)
 
 @app.get("/prestamos/{id}/pagos")
@@ -474,13 +512,16 @@ def listar_pagos_prestamo(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al listar pagos: {e}")
 
+# ───────────────────────────────────────────────────────────────────
+# GET /prestamos/resumen  → resumen por préstamo (totales/último pago)
+# ───────────────────────────────────────────────────────────────────
 @app.get("/prestamos/resumen")
 def listar_prestamos_resumen():
     """
     Devuelve cada préstamo con:
-    - total_pagado (Suma de pagos)
-    - deuda_restante = valor_cuota * cuotas_totales - total_pagado
-    - ultimo_mes / ultimo_anio (del último pago registrado)
+      - total_pagado (suma de pagos en pagos_prestamo)
+      - deuda_restante = valor_cuota * cuotas_totales - total_pagado
+      - ultimo_mes / ultimo_anio del último pago registrado
     """
     try:
         conn = get_conn()
@@ -491,7 +532,7 @@ def listar_prestamos_resumen():
                   p.nombre,
                   p.valor_cuota,
                   p.cuotas_totales,
-                  p.cuotas_pagadas,
+                  COALESCE(p.cuotas_pagadas, 0) AS cuotas_pagadas,
                   p.primer_mes,
                   p.primer_anio,
                   p.banco,
@@ -518,24 +559,18 @@ def listar_prestamos_resumen():
         conn.close()
         return {"ok": True, "data": _fix_json(rows)}
     except psycopg2.errors.UndefinedTable:
+        # si aún no existen tablas, devolvemos vacío
         return {"ok": True, "data": []}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al cargar resumen de préstamos: {e}")
 
 @app.delete("/prestamos/{id}")
 def eliminar_prestamo(id: int):
-    """
-    Elimina el préstamo y todos sus pagos asociados.
-    OJO: como la FK de pagos_prestamo no tiene ON DELETE CASCADE,
-    acá borramos primero los pagos y luego el préstamo.
-    """
     try:
         conn = get_conn()
         ensure_pagos_prestamo_table(conn)
         with conn.cursor() as cur:
-            # borrar pagos primero
             cur.execute("DELETE FROM pagos_prestamo WHERE prestamo_id = %s;", (id,))
-            # borrar préstamo
             cur.execute("DELETE FROM prestamos WHERE id = %s;", (id,))
             if cur.rowcount == 0:
                 raise HTTPException(status_code=404, detail="Préstamo no encontrado")
@@ -545,11 +580,6 @@ def eliminar_prestamo(id: int):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar préstamo: {e}")
-
-
-
-
-
 
 # -------------------------------------------------------------------
 #  TARJETAS
@@ -619,6 +649,81 @@ def eliminar_tarjeta(id: int):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar tarjeta: {e}")
+
+# --- NUEVOS ENDPOINTS: detalle de tarjeta -----------------------------
+@app.get("/tarjetas/{id}/detalle")
+def get_tarjeta_detalle(id: int):
+    try:
+        conn = get_conn()
+        ensure_tarjeta_detalle_table(conn)
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM tarjeta_detalle WHERE tarjeta_id=%s;", (id,))
+            row = cur.fetchone()
+        conn.close()
+        return {"ok": True, "data": _fix_json([row])[0] if row else None}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al leer detalle: {e}")
+
+@app.put("/tarjetas/{id}/detalle")
+def upsert_tarjeta_detalle(
+    id: int,
+    alias: Optional[str] = None,
+    pan_last4: Optional[str] = None,
+    expiracion_mes: Optional[int] = Query(default=None, ge=1, le=12),
+    expiracion_anio: Optional[int] = Query(default=None, ge=2000, le=2100),
+    fecha_entrega: Optional[date] = None,
+    red: Optional[str] = None,
+):
+    """
+    Upsert sin requerir índice único: si existe UPDATE, si no INSERT.
+    Se aceptan parámetros por query (compatible con api.put(url, null, { params }))
+    """
+    try:
+        conn = get_conn()
+        ensure_tarjeta_detalle_table(conn)
+        data = {
+            "alias": alias,
+            "pan_last4": pan_last4,
+            "expiracion_mes": expiracion_mes,
+            "expiracion_anio": expiracion_anio,
+            "fecha_entrega": fecha_entrega,
+            "red": red,
+        }
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id FROM tarjeta_detalle WHERE tarjeta_id=%s;", (id,))
+            row = cur.fetchone()
+            if row:
+                sets = ", ".join([f"{k} = %s" for k in data.keys()]) + ", updated_at = NOW()"
+                cur.execute(
+                    f"UPDATE tarjeta_detalle SET {sets} WHERE tarjeta_id=%s RETURNING *;",
+                    list(data.values()) + [id],
+                )
+                _ = cur.fetchone()
+            else:
+                cols = ["tarjeta_id"] + list(data.keys())
+                vals = [id] + list(data.values())
+                placeholders = ", ".join(["%s"] * len(cols))
+                cur.execute(
+                    f"INSERT INTO tarjeta_detalle ({', '.join(cols)}) VALUES ({placeholders}) RETURNING *;",
+                    vals,
+                )
+                _ = cur.fetchone()
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al guardar detalle: {e}")
+
+@app.delete("/tarjetas/{id}/detalle")
+def delete_tarjeta_detalle(id: int):
+    try:
+        conn = get_conn()
+        ensure_tarjeta_detalle_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tarjeta_detalle WHERE tarjeta_id=%s;", (id,))
+        conn.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar detalle: {e}")
 
 # -------------------------------------------------------------------
 #  GASTOS
@@ -704,6 +809,53 @@ def eliminar_gasto(id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar gasto: {e}")
 
+@app.post("/gastos/{id}/pagar")
+def pagar_gasto(id: int, body: GastoPagarIn):
+    try:
+        conn = get_conn()
+        ensure_pagos_gasto_table(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, nombre, monto, mes, anio, pagado, con_tarjeta, tarjeta_id
+                FROM gastos WHERE id = %s;
+            """, (id,))
+            gasto = cur.fetchone()
+
+        if not gasto:
+            raise HTTPException(status_code=404, detail="Gasto no encontrado")
+
+        pagado_val = gasto.get("pagado", False)
+        try:
+            ya_pagado = bool(pagado_val) if isinstance(pagado_val, bool) else int(pagado_val) == 1
+        except Exception:
+            ya_pagado = bool(pagado_val)
+        if ya_pagado:
+            raise HTTPException(status_code=409, detail="El gasto ya está marcado como pagado")
+
+        fecha = body.fecha or date.today()
+        monto = body.monto if body.monto is not None else float(gasto["monto"] or 0)
+        metodo = body.metodo or ("Crédito" if gasto.get("con_tarjeta") else "Efectivo/Débito")
+        tarjeta_id = body.tarjeta_id if body.tarjeta_id is not None else gasto.get("tarjeta_id")
+        nota = body.nota
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO pagos_gasto (gasto_id, fecha, monto, metodo, tarjeta_id, nota)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *;
+            """, (id, fecha, monto, metodo, tarjeta_id, nota))
+            pago_row = cur.fetchone()
+            cur.execute("UPDATE gastos SET pagado = TRUE WHERE id = %s;", (id,))
+
+        conn.close()
+        return {"ok": True, "data": _fix_json([pago_row])[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.getLogger("uvicorn.error").exception("Error al pagar gasto")
+        raise HTTPException(status_code=500, detail=f"Error al pagar gasto: {e}")
+
 # -------------------------------------------------------------------
 #  FACTURAS (para tarjetas)
 # -------------------------------------------------------------------
@@ -760,11 +912,6 @@ def crear_factura(body: FacturaIn):
 
 @app.put("/facturas/{id}")
 def editar_factura(id: int, body: FacturaUpdate):
-    """
-    Update parcial. Si 'pagada' cambia:
-      - pagada=True y sin fecha_pago -> fecha_pago = hoy
-      - pagada=False -> fecha_pago = NULL
-    """
     try:
         conn = get_conn()
         ensure_facturas_table(conn)
@@ -820,14 +967,14 @@ def root():
         "name": "Finanzas API",
         "endpoints": [
             "/health",
-            "/prestamos", "/prestamos/resumen", "/prestamos/{id}/pagar", "/prestamos/{id}/pagos",
-            "/gastos",
-            "/tarjetas",
+            "/prestamos", "/prestamos/{id}/pagar", "/prestamos/{id}/pagos", "/prestamos/resumen",
+            "/gastos", "/gastos/{id}/pagar",
+            "/tarjetas", "/tarjetas/{id}/detalle",
             "/facturas",
         ],
     }
 
-# Manejo amable de preflight (CORS)
 @app.options("/{full_path:path}")
 def preflight(full_path: str):
     return Response(status_code=200)
+

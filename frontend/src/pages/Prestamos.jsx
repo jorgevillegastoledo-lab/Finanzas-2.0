@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
+import { useToast, useConfirm } from "../ui/notifications";
 
 const MESES = ["", "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 const hoy = new Date();
@@ -10,6 +11,8 @@ const ANIO_ACTUAL = hoy.getFullYear();
 
 const fmtCLP = (n) =>
   new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(n || 0));
+
+const fmtError = (e) => e?.response?.data?.detail || e?.message || String(e);
 
 // Etiqueta arriba del campo
 const L = ({ label, children }) => (
@@ -20,6 +23,9 @@ const L = ({ label, children }) => (
 );
 
 export default function Prestamos() {
+  const { success, error, warning } = useToast();
+  const confirm = useConfirm();
+
   // Vista contable (para ocultar préstamos “no iniciados”)
   const [vMes, setVMes] = useState(MES_ACTUAL);
   const [vAnio, setVAnio] = useState(ANIO_ACTUAL);
@@ -84,7 +90,7 @@ export default function Prestamos() {
       setItems(arr);
       if (sel) setSel(arr.find(x => x.id === sel.id) || null);
     } catch (e) {
-      setErr(e?.response?.data?.detail || "No pude cargar préstamos");
+      setErr(fmtError(e) || "No pude cargar préstamos");
     } finally {
       setLoading(false);
     }
@@ -107,7 +113,7 @@ export default function Prestamos() {
 
   async function crear() {
     if (!nuevo.nombre || !nuevo.valor_cuota || !nuevo.cuotas_totales) {
-      alert("Nombre, valor cuota y cuotas totales son obligatorios.");
+      warning("Nombre, valor cuota y cuotas totales son obligatorios.");
       return;
     }
     try {
@@ -121,8 +127,9 @@ export default function Prestamos() {
       });
       setNuevo({ nombre:"", valor_cuota:"", cuotas_totales:"", primer_mes:"", primer_anio:"", banco:"" });
       await listar();
+      success("Préstamo creado");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude crear el préstamo");
+      error({ title: "No pude crear el préstamo", description: fmtError(e) });
     }
   }
 
@@ -138,27 +145,41 @@ export default function Prestamos() {
         banco: edit.banco || null
       });
       await listar();
+      success("Cambios guardados");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude guardar cambios");
+      error({ title: "No pude guardar cambios", description: fmtError(e) });
     }
   }
 
   // eliminar préstamo (y sus pagos)
   async function eliminarPrestamo() {
     if (!sel) return;
-    if (!confirm("¿Eliminar este préstamo y todos sus pagos?")) return;
+
+    const ok = await confirm({
+      title: "¿Eliminar préstamo?",
+      message: "Se eliminarán también sus pagos registrados. Esta acción no se puede deshacer.",
+      confirmText: "Eliminar",
+      tone: "danger",
+    });
+    if (!ok) return;
+
     try {
       await api.delete(`/prestamos/${sel.id}`);
       setSel(null);
       await listar();
+      success("Préstamo eliminado");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude eliminar el préstamo");
+      error({ title: "No pude eliminar el préstamo", description: fmtError(e) });
     }
   }
 
   // Pago de cuota
   async function marcarPago() {
     if (!sel) return;
+    if (!pagoMes || !pagoAnio) {
+      warning("Selecciona mes y año contable del pago.");
+      return;
+    }
     try {
       await api.post(`/prestamos/${sel.id}/pagar`, {
         mes_contable: Number(pagoMes),
@@ -166,8 +187,9 @@ export default function Prestamos() {
         monto_pagado: pagoValor ? Number(pagoValor) : undefined, // si no envías, backend usa valor_cuota
       });
       await listar();
+      success("Pago registrado");
     } catch (e) {
-      alert(e?.response?.data?.detail || "No pude registrar el pago");
+      error({ title: "No pude registrar el pago", description: fmtError(e) });
     }
   }
 
@@ -295,7 +317,6 @@ export default function Prestamos() {
             </button>
           </div>
 
-          {/* Añadimos etiquetas: */}
           <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr 2fr auto auto", gap:10, alignItems:"end" }}>
             <L label="Valor cuota">
               <input
