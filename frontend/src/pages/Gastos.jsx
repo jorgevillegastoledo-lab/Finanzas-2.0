@@ -63,7 +63,25 @@ async function crearPagoGastoAPI(payload) {
   }
 }
 
-// ---------------------------------------------
+// ---------------- Detalle Gasto (modal) ----------------
+const emptyGastoDetalle = {
+  compania: "",
+  rut: "",
+  tipo_doc: "",
+  numero_doc: "",
+  fecha_doc: "",
+  metodo_pago: "",
+  neto: "",
+  iva: "",
+  exento: "",
+  descuento: "",
+  total_doc: "",
+  garantia_meses: "",
+  garantia_hasta: "",
+  ubicacion: "",
+  tags: "",   // CSV en el UI; se convierte a array
+  nota: "",
+};
 
 export default function Gastos() {
   const { success, error, warning } = useToast();
@@ -109,8 +127,6 @@ export default function Gastos() {
 
   // Tarjetas
   const [tarjetas, setTarjetas] = useState([]);
-
-  // Mapa id -> nombre para mostrar tarjeta en la tabla
   const tarjetaNombreMap = useMemo(() => {
     const m = {};
     (tarjetas || []).forEach((t) => {
@@ -128,6 +144,149 @@ export default function Gastos() {
     return tarjetaNombreMap[String(id)] || `Tarjeta ${id}`;
   }
 
+  // ------- Menú contextual (como en Tarjetas) -------
+  const [menu, setMenu] = useState({ show:false, x:0, y:0, target:null });
+  const menuRef = useRef(null);
+
+  const openMenu = (e, g) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ show:true, x:e.clientX, y:e.clientY, target:g });
+  };
+
+  useEffect(() => {
+    const onDown = (e) => e.key === "Escape" && setMenu((m)=>({ ...m, show:false }));
+    const onClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenu((m)=>({ ...m, show:false }));
+      }
+    };
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("click", onClick);
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("click", onClick);
+    };
+  }, []);
+
+  const openEditor = (row) => {
+    const r = row || menu.target;
+    if (!r) return;
+    setMenu(m => ({ ...m, show:false }));
+    setSel(r);
+    setEdit({
+      nombre: r.nombre ?? "",
+      monto: String(r.monto ?? ""),
+      mes: String(r.mes ?? ""),
+      anio: String(r.anio ?? ""),
+      pagado: Boolean(r.pagado),
+      es_recurrente: Boolean(r.es_recurrente ?? r.recurrente),
+      fp_ui: isCredito(r) ? FP.CREDITO : FP.EFECTIVO,
+      tarjeta_id: r.tarjeta_id ? String(r.tarjeta_id) : "",
+    });
+    setTimeout(()=>editRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }),0);
+  };
+
+  // ------- Modal Detalles de gasto -------
+  const [detOpen, setDetOpen] = useState(false);
+  const [detBusy, setDetBusy] = useState(false);
+  const [det, setDet] = useState(emptyGastoDetalle);
+  const [detGastoId, setDetGastoId] = useState(null);
+
+  const openDetalles = async () => {
+    const id = menu.target?.id ?? sel?.id;
+    if (!id) { warning("Primero selecciona un gasto"); return; }
+    setDetGastoId(id);
+    setDet(emptyGastoDetalle);
+    setMenu(m => ({ ...m, show:false }));
+    setDetOpen(true);
+    try {
+      const { data } = await api.get(`/gastos/${id}/detalle`);
+      const d = data?.data ?? data;
+      if (d) {
+        setDet({
+          compania: d.compania ?? "",
+          rut: d.rut ?? "",
+          tipo_doc: d.tipo_doc ?? "",
+          numero_doc: d.numero_doc ?? "",
+          fecha_doc: d.fecha_doc ?? "",
+          metodo_pago: d.metodo_pago ?? "",
+          neto: d.neto ?? "",
+          iva: d.iva ?? "",
+          exento: d.exento ?? "",
+          descuento: d.descuento ?? "",
+          total_doc: d.total_doc ?? "",
+          garantia_meses: d.garantia_meses ?? "",
+          garantia_hasta: d.garantia_hasta ?? "",
+          ubicacion: d.ubicacion ?? "",
+          tags: Array.isArray(d.tags) ? d.tags.join(", ") : (d.tags || ""),
+          nota: d.nota ?? "",
+        });
+      }
+    } catch (e) {
+      // sin detalle => queda vacío
+      console.warn("GET detalle gasto falló:", e?.response?.data || e);
+    }
+  };
+
+  const saveDetalle = async () => {
+    if (!detGastoId) { warning("No hay gasto seleccionado"); return; }
+    try {
+      setDetBusy(true);
+      const payload = {
+        compania: det.compania || null,
+        rut: det.rut || null,
+        tipo_doc: det.tipo_doc || null,
+        numero_doc: det.numero_doc || null,
+        fecha_doc: det.fecha_doc || null,
+        metodo_pago: det.metodo_pago || null,
+        neto: det.neto !== "" ? Number(det.neto) : null,
+        iva: det.iva !== "" ? Number(det.iva) : null,
+        exento: det.exento !== "" ? Number(det.exento) : null,
+        descuento: det.descuento !== "" ? Number(det.descuento) : null,
+        total_doc: det.total_doc !== "" ? Number(det.total_doc) : null,
+        garantia_meses: det.garantia_meses !== "" ? Number(det.garantia_meses) : null,
+        garantia_hasta: det.garantia_hasta || null,
+        ubicacion: det.ubicacion || null,
+        tags: det.tags
+          ? det.tags.split(",").map(s=>s.trim()).filter(Boolean)
+          : null,
+        nota: det.nota || null,
+      };
+      await api.put(`/gastos/${detGastoId}/detalle`, payload);
+      success("Detalles guardados");
+      setDetOpen(false);
+    } catch (e) {
+      const msg =
+        e?.response?.data?.detail || e?.message || "No pude guardar el detalle";
+      console.error("saveDetalle error:", e?.response?.data || e);
+      error(msg);
+    } finally {
+      setDetBusy(false);
+    }
+  };
+
+  const deleteDetalle = async () => {
+    if (!detGastoId) return;
+    const ok = await confirm({
+      title: "¿Eliminar detalles?",
+      message: "Se eliminará la información adicional de este gasto.",
+      confirmText: "Eliminar",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      setDetBusy(true);
+      await api.delete(`/gastos/${detGastoId}/detalle`);
+      success("Detalle eliminado");
+      setDetOpen(false);
+    } catch (e) {
+      error(e?.response?.data?.detail || "No pude eliminar el detalle");
+    } finally {
+      setDetBusy(false);
+    }
+  };
+
   // Carga inicial
   useEffect(() => {
     loadTarjetas();
@@ -135,6 +294,7 @@ export default function Gastos() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // refresca edición cuando cambia selección
   useEffect(() => {
     if (!sel) return;
     setEdit({
@@ -287,9 +447,8 @@ export default function Gastos() {
           return;
         }
         success("Pago registrado");
-        // Ya no hacemos PUT /gastos/:id porque /gastos/:id/pagar lo dejó pagado.
       } else {
-        // Deshacer pagado: solo bajamos el flag (conserva datos de tarjeta si tenía)
+        // Deshacer pagado
         await api.put(`/gastos/${sel.id}`, {
           nombre: sel.nombre,
           monto: Number(sel.monto || 0),
@@ -491,7 +650,7 @@ export default function Gastos() {
           </div>
         ) : (
           <>
-            <div style={{ overflowX: "auto" }}>
+            <div style={{ overflowX: "auto", position:"relative" }}>
               <div style={{ maxHeight: "50vh", overflowY: "auto", border: "1px solid #1f2a44", borderRadius: 12 }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
@@ -515,8 +674,10 @@ export default function Gastos() {
                       return (
                         <tr
                           key={g.id}
-                          onClick={() => setSel(g)}
-                          style={{ ...styles.tr, background: selected ? "#1a253a" : "transparent" }}
+                          onClick={(e)=>openMenu(e,g)}
+                          onContextMenu={(e)=>openMenu(e,g)}
+                          style={{ ...styles.tr, background: selected ? "#1a253a" : "transparent", cursor:"pointer" }}
+                          title="Click para acciones (detalles / editar)"
                         >
                           <td style={styles.td}>{g.id}</td>
                           <td style={styles.td}>{g.nombre}</td>
@@ -533,11 +694,31 @@ export default function Gastos() {
                   </tbody>
                 </table>
               </div>
+
+              {/* Menú contextual */}
+              {menu.show && (
+                <div
+                  ref={menuRef}
+                  style={{
+                    position:"fixed", top:menu.y+8, left:menu.x+8,
+                    background:"#0e1626", border:"1px solid #24324a", borderRadius:10,
+                    boxShadow:"0 8px 30px rgba(0,0,0,.4)", zIndex:50, minWidth:220
+                  }}
+                >
+                  <div style={{ padding:10, borderBottom:"1px solid #1f2a44", fontSize:12, opacity:.8 }}>
+                    ID {menu.target?.id} — {menu.target?.nombre}
+                  </div>
+                  <button onClick={openDetalles} style={styles.menuItem}>📄 Ver detalles</button>
+                  <button onClick={()=>openEditor()} style={{ ...styles.menuItem, borderTop:"1px solid #1f2a44" }}>
+                    ✏️ Editar / Eliminar
+                  </button>
+                </div>
+              )}
             </div>
 
             {!sel && (
               <div style={{ marginTop: 10, opacity: 0.7, fontSize: 13 }}>
-                Tip: haz clic en una fila para editar, eliminar o marcar/deshacer pago.
+                Tip: haz clic en una fila para abrir el menú de acciones.
               </div>
             )}
           </>
@@ -637,6 +818,87 @@ export default function Gastos() {
             >
               Deshacer pagado
             </button>
+            <button onClick={openDetalles} style={{ ...ui.btn, background:"#17a2b8" }}>
+              📄 Detalles
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Detalles */}
+      {detOpen && (
+        <div style={styles.modalBackdrop} onClick={()=>setDetOpen(false)}>
+          <div style={styles.modal} onClick={(e)=>e.stopPropagation()}>
+            <div style={{ fontWeight:700, marginBottom:12 }}>
+              🧾 Detalles del gasto
+              <span style={{ fontSize:12, opacity:.7, marginLeft:8 }}>(informativo)</span>
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"1.2fr 1fr 1fr 1fr", gap:10 }}>
+              <Field label="Compañía">
+                <input style={styles.input} value={det.compania} onChange={(e)=>setDet({ ...det, compania:e.target.value })}/>
+              </Field>
+              <Field label="RUT">
+                <input style={styles.input} value={det.rut} onChange={(e)=>setDet({ ...det, rut:e.target.value })}/>
+              </Field>
+              <Field label="Tipo doc.">
+                <select style={styles.input} value={det.tipo_doc} onChange={(e)=>setDet({ ...det, tipo_doc:e.target.value })}>
+                  <option value="">—</option>
+                  <option value="boleta">Boleta</option>
+                  <option value="factura">Factura</option>
+                  <option value="ticket">Ticket</option>
+                  <option value="otro">Otro</option>
+                </select>
+              </Field>
+              <Field label="N° doc.">
+                <input style={styles.input} value={det.numero_doc} onChange={(e)=>setDet({ ...det, numero_doc:e.target.value })}/>
+              </Field>
+
+              <Field label="Fecha doc.">
+                <input type="date" style={styles.input} value={det.fecha_doc || ""} onChange={(e)=>setDet({ ...det, fecha_doc:e.target.value })}/>
+              </Field>
+              <Field label="Método pago">
+                <input style={styles.input} value={det.metodo_pago} onChange={(e)=>setDet({ ...det, metodo_pago:e.target.value })} placeholder="efectivo/debito/credito/transferencia"/>
+              </Field>
+              <Field label="Neto">
+                <input type="number" style={styles.input} value={det.neto} onChange={(e)=>setDet({ ...det, neto:e.target.value })}/>
+              </Field>
+              <Field label="IVA">
+                <input type="number" style={styles.input} value={det.iva} onChange={(e)=>setDet({ ...det, iva:e.target.value })}/>
+              </Field>
+
+              <Field label="Exento">
+                <input type="number" style={styles.input} value={det.exento} onChange={(e)=>setDet({ ...det, exento:e.target.value })}/>
+              </Field>
+              <Field label="Descuento">
+                <input type="number" style={styles.input} value={det.descuento} onChange={(e)=>setDet({ ...det, descuento:e.target.value })}/>
+              </Field>
+              <Field label="Total doc.">
+                <input type="number" style={styles.input} value={det.total_doc} onChange={(e)=>setDet({ ...det, total_doc:e.target.value })}/>
+              </Field>
+              <Field label="Ubicación">
+                <input style={styles.input} value={det.ubicacion} onChange={(e)=>setDet({ ...det, ubicacion:e.target.value })}/>
+              </Field>
+
+              <Field label="Garantía (meses)">
+                <input type="number" style={styles.input} value={det.garantia_meses} onChange={(e)=>setDet({ ...det, garantia_meses:e.target.value })}/>
+              </Field>
+              <Field label="Garantía hasta">
+                <input type="date" style={styles.input} value={det.garantia_hasta || ""} onChange={(e)=>setDet({ ...det, garantia_hasta:e.target.value })}/>
+              </Field>
+              <Field label="Tags (coma)">
+                <input style={styles.input} value={det.tags} onChange={(e)=>setDet({ ...det, tags:e.target.value })} placeholder="hogar, supermercado"/>
+              </Field>
+              <Field label="Nota" style={{ gridColumn:"span 4" }}>
+                <textarea style={{ ...styles.input, minHeight:80 }} value={det.nota} onChange={(e)=>setDet({ ...det, nota:e.target.value })}/>
+              </Field>
+            </div>
+
+            <div style={{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:14 }}>
+              <button type="button" onClick={()=>setDetOpen(false)} style={{ ...ui.btn, background:"#6c757d" }}>Cerrar</button>
+              <button type="button" onClick={deleteDetalle} style={{ ...ui.btn, background:"#ff3b30" }} disabled={detBusy}>Eliminar</button>
+              <button type="button" onClick={saveDetalle} style={ui.btn} disabled={detBusy}>{detBusy ? "Guardando..." : "Guardar"}</button>
+            </div>
           </div>
         </div>
       )}
@@ -665,7 +927,7 @@ const styles = {
     borderBottom: "1px solid #1f2a44",
     whiteSpace: "nowrap",
   },
-  tr: { cursor: "pointer" },
+  tr: { transition:"background .15s ease" },
   smallBtn: {
     padding: "6px 10px",
     border: 0,
@@ -681,4 +943,7 @@ const styles = {
     padding: "8px 10px",
     borderRadius: 8,
   },
+  menuItem:{ display:"block", width:"100%", textAlign:"left", padding:"10px 12px", background:"transparent", color:"#e6f0ff", border:0, cursor:"pointer" },
+  modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
+  modal:{ width:"min(1100px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
