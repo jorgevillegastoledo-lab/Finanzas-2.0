@@ -8,13 +8,11 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field, ConfigDict
 
 from sqlalchemy import text
-from db import get_db
-
+from db import get_db  # si usas el get_db del proyecto; abajo hay un fallback equivalente
 from db import SessionLocal, Base, engine
 from sqlalchemy import Column, Integer, String, DateTime, func
 
 from auth import get_current_user  # si ya lo tienes
-# Si tu get_current_user está en otro sitio, ajusta el import.
 
 router = APIRouter(prefix="/prestamos", tags=["Prestamos"])
 
@@ -88,6 +86,7 @@ class PrestamoOut(BaseModel):
     finalizado: bool
     vence_en_mes: bool = False  # se marca si cae en el mes/anio filtrado
 
+# Fallback local por si no usas el import de get_db anterior
 def get_db():
     db = SessionLocal()
     try:
@@ -95,7 +94,30 @@ def get_db():
     finally:
         db.close()
 
-def build_out(p: Prestamo, mes_filtro: Optional[int]=None, anio_filtro: Optional[int]=None) -> PrestamoOut:
+# --------- Helpers internos ---------
+SENSITIVE_FIELDS = {"valor_cuota", "cuotas_totales", "primer_anio", "primer_mes"}
+
+def _has_pagos_registrados(db: Session, prestamo_id: int) -> bool:
+    """
+    Verifica si existen pagos asociados al préstamo, ya sea por contador
+    'cuotas_pagadas' o por filas reales en 'pagos_prestamo'.
+    """
+    p = db.get(Prestamo, prestamo_id)
+    if not p:
+        return False
+    if (p.cuotas_pagadas if hasattr(p, "cuotas_pagadas") else 0) > 0:
+        return True
+    try:
+        cnt = db.execute(
+            text("SELECT COUNT(*) FROM pagos_prestamo WHERE prestamo_id = :pid"),
+            {"pid": prestamo_id},
+        ).scalar()
+        return bool(cnt and cnt > 0)
+    except Exception:
+        # Si la tabla no existe en algún entorno, no rompemos.
+        return False
+
+def build_out(p: Prestamo, mes_filtro: Optional[int] = None, anio_filtro: Optional[int] = None) -> PrestamoOut:
     cuotas_rest = max(p.cuotas_totales - p.cuotas_pagadas, 0)
     monto_pagado = p.valor_cuota * p.cuotas_pagadas
     saldo_restante = p.valor_cuota * cuotas_rest
@@ -126,6 +148,7 @@ def build_out(p: Prestamo, mes_filtro: Optional[int]=None, anio_filtro: Optional
         vence_en_mes=vence_en_mes
     )
 
+# --------- Rutas ---------
 @router.get("", response_model=dict)
 def listar_prestamos(
     mes: Optional[int] = Query(None, ge=1, le=12),
@@ -150,7 +173,11 @@ def listar_prestamos(
     }
 
 @router.post("", response_model=PrestamoOut)
-def crear_prestamo(data: PrestamoCreate, db: Session = Depends(get_db), _user=Depends(get_current_user)):
+def crear_prestamo(
+    data: PrestamoCreate,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
     if data.cuotas_pagadas > data.cuotas_totales:
         raise HTTPException(400, "Las cuotas pagadas no pueden superar las totales.")
     p = Prestamo(**data.model_dump())
@@ -160,20 +187,50 @@ def crear_prestamo(data: PrestamoCreate, db: Session = Depends(get_db), _user=De
     return build_out(p)
 
 @router.put("/{pid}", response_model=PrestamoOut)
-def actualizar_prestamo(pid: int, data: PrestamoUpdate, db: Session = Depends(get_db), _user=Depends(get_current_user)):
+def actualizar_prestamo(
+    pid: int,
+    data: PrestamoUpdate,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
     p = db.get(Prestamo, pid)
     if not p:
         raise HTTPException(404, "Préstamo no encontrado")
-    for k, v in data.model_dump(exclude_unset=True).items():
+
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        return build_out(p)
+
+    # --- BLOQUEO ESTRICTO (Opción A) ---
+    if any(field in changes for field in SENSITIVE_FIELDS):
+        if _has_pagos_registrados(db, pid):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "No puedes editar 'valor de cuota', 'cuotas totales' ni la 'fecha inicial' "
+                    "(mes/año) porque este préstamo ya tiene pagos registrados. "
+                    "Si el alta tuvo un error, elimina el préstamo y créalo de nuevo con los valores correctos."
+                )
+            )
+
+    # Aplicar cambios permitidos
+    for k, v in changes.items():
         setattr(p, k, v)
+
+    # Validaciones básicas
     if p.cuotas_pagadas > p.cuotas_totales:
         raise HTTPException(400, "Las cuotas pagadas no pueden superar las totales.")
+
     db.commit()
     db.refresh(p)
     return build_out(p)
 
 @router.post("/{pid}/pagar", response_model=PrestamoOut)
-def pagar_cuota(pid: int, db: Session = Depends(get_db), _user=Depends(get_current_user)):
+def pagar_cuota(
+    pid: int,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
     p = db.get(Prestamo, pid)
     if not p:
         raise HTTPException(404, "Préstamo no encontrado")
@@ -184,18 +241,70 @@ def pagar_cuota(pid: int, db: Session = Depends(get_db), _user=Depends(get_curre
     db.refresh(p)
     return build_out(p)
 
+@router.post("/{pid}/deshacer", response_model=PrestamoOut)
+def deshacer_pago(
+    pid: int,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
+    """
+    Deshace el último pago:
+      - Decrementa en 1 'cuotas_pagadas' si es > 0.
+      - Si existe la tabla 'pagos_prestamo', intenta borrar el último registro (mayor año/mes/ID).
+    """
+    p = db.get(Prestamo, pid)
+    if not p:
+        raise HTTPException(404, "Préstamo no encontrado")
+    if p.cuotas_pagadas <= 0:
+        raise HTTPException(400, "No hay pagos para deshacer.")
+
+    # Decrementamos el contador
+    p.cuotas_pagadas -= 1
+
+    # Intentamos limpiar el último registro de pagos_prestamo (si existe la tabla)
+    try:
+        db.execute(text("""
+            DELETE FROM pagos_prestamo
+            WHERE id IN (
+              SELECT id
+              FROM pagos_prestamo
+              WHERE prestamo_id = :pid
+              ORDER BY anio_contable DESC, mes_contable DESC, id DESC
+              LIMIT 1
+            )
+        """), {"pid": pid})
+    except Exception:
+        # Si la tabla no existe, no rompemos la operación de deshacer.
+        pass
+
+    db.commit()
+    db.refresh(p)
+    return build_out(p)
+
 @router.delete("/{pid}")
-def eliminar_prestamo(pid: int, db: Session = Depends(get_db), _user=Depends(get_current_user)):
+def eliminar_prestamo(
+    pid: int,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
     p = db.get(Prestamo, pid)
     if not p:
         raise HTTPException(404, "Préstamo no encontrado")
     db.delete(p)
     db.commit()
     return {"ok": True}
-    
-    
-    @r.post("/pagos_prestamo")
-def registrar_pago(body: dict, db=Depends(get_db)):
+
+# Registro directo de pagos (con SQL crudo) — ruta mantenida
+@router.post("/pagos_prestamo")
+def registrar_pago(
+    body: dict,
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
+    """
+    Inserta un pago en pagos_prestamo. Se recomienda tener un índice único
+    por (prestamo_id, mes_contable, anio_contable) para evitar duplicados.
+    """
     q = text("""
       INSERT INTO pagos_prestamo (prestamo_id, mes_contable, anio_contable, valor_cuota)
       VALUES (:prestamo_id, :mes, :anio, :valor)
@@ -209,6 +318,7 @@ def registrar_pago(body: dict, db=Depends(get_db)):
             # si viene null, el trigger BEFORE INSERT lo completa
             "valor": body.get("valor_cuota"),
         }).mappings().first()
+        db.commit()
         return row
     except Exception as e:
         # índice único o cualquier otra restricción
