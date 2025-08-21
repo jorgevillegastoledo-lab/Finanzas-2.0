@@ -15,7 +15,7 @@ const fmtCLP = (n) =>
 
 const fmtError = (e) => e?.response?.data?.detail || e?.message || String(e);
 
-// Etiqueta arriba del campo
+// Etiqueta
 const L = ({ label, children }) => (
   <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
     <span style={{ fontSize:12, color:"#9db7d3", opacity:.9, padding:"0 2px" }}>{label}</span>
@@ -27,43 +27,28 @@ export default function FacturacionTarjetas() {
   const { success, error, warning } = useToast();
   const confirm = useConfirm();
 
-  // ───── datos base
+  // base
   const [tarjetas, setTarjetas] = useState([]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // ───── vista contable
+  // vista
   const [vMes, setVMes] = useState(MES_ACTUAL);
   const [vAnio, setVAnio] = useState(ANIO_ACTUAL);
-  const [fTarjeta, setFTarjeta] = useState(""); // filtro de tarjeta (a la derecha)
+  const [fTarjeta, setFTarjeta] = useState("");
 
-  // ───── crear (inicializado con TODOS los campos usados)
-  const emptyNuevo = {
-    tarjeta_id: "",
-    mes: String(MES_ACTUAL),
-    anio: String(ANIO_ACTUAL),
-    fecha_emision: "",
-    fecha_vencimiento: "",
-    total_pagar: "",
-    pago_minimo: "",
-    nro_estado: "",
-  };
+  // crear
+  const emptyNuevo = { tarjeta_id:"", mes:String(MES_ACTUAL), anio:String(ANIO_ACTUAL), fecha_emision:"", fecha_vencimiento:"", total_pagar:"", pago_minimo:"", nro_estado:"" };
   const [nuevo, setNuevo] = useState(emptyNuevo);
   const [savingNew, setSavingNew] = useState(false);
 
-  // ───── selección / edición
+  // selección/edición
   const [sel, setSel] = useState(null);
-  const [edit, setEdit] = useState({
-    tarjeta_id:"", mes:"", anio:"",
-    fecha_emision:"", fecha_vencimiento:"",
-    total_pagar:"", pago_minimo:"",
-    nro_estado:"", nota:"",
-    pagado:false, monto_pagado:"", fecha_pago:""
-  });
+  const [edit, setEdit] = useState({ tarjeta_id:"", mes:"", anio:"", total_pagar:"", pagado:false, fecha_pago:"", monto_pagado:"" });
   const editRef = useRef(null);
 
-  // ───── menú contextual
+  // menú contextual
   const [menu, setMenu] = useState({ show:false, x:0, y:0, target:null, openedAt:0 });
   const menuRef = useRef(null);
   useEffect(() => {
@@ -83,16 +68,17 @@ export default function FacturacionTarjetas() {
   const openMenu = (e, row) => { e.preventDefault?.(); e.stopPropagation?.(); setMenu({ show:true, x:e.clientX, y:e.clientY, target:row, openedAt:Date.now() }); };
   const openEditor = (row) => { const r = row || menu.target; if (!r) return; setMenu(m=>({ ...m, show:false })); setSel(r); setTimeout(()=>editRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }),0); };
 
-  // ───── detalles (modal mini: nro_estado + nota)
+  // detalles (modal)
   const [detOpen, setDetOpen] = useState(false);
   const [detBusy, setDetBusy] = useState(false);
-  const [detNro, setDetNro] = useState("");
-  const [detNota, setDetNota] = useState("");
+  const [det, setDet] = useState({
+    fecha_emision:"", fecha_vencimiento:"", pago_minimo:"", monto_pagado:"", nro_estado:"", nota:""
+  });
 
   const tarjetaLabel = (obj) =>
     (obj.banco ? `${obj.banco} — ` : "") + (obj.tarjeta || obj.nombre || `Tarjeta ${obj.tarjeta_id ?? obj.id ?? ""}`);
 
-  // ───── cargas
+  // cargas
   useEffect(() => { loadTarjetas(); }, []);
   useEffect(() => { loadEstados(); /* eslint-disable-next-line */ }, [vMes, vAnio, fTarjeta]);
 
@@ -105,9 +91,7 @@ export default function FacturacionTarjetas() {
   async function loadEstados() {
     try {
       setErr(""); setLoading(true);
-      const { data } = await api.get("/facturas", {
-        params:{ mes:Number(vMes), anio:Number(vAnio), tarjeta_id: fTarjeta || undefined }
-      });
+      const { data } = await api.get("/facturas", { params:{ mes:Number(vMes), anio:Number(vAnio), tarjeta_id: fTarjeta || undefined }});
       const arr = Array.isArray(data) ? data : (data?.data ?? []);
       setItems(arr);
       if (sel) setSel(arr.find(x=>x.id === sel.id) || null);
@@ -117,31 +101,24 @@ export default function FacturacionTarjetas() {
     } finally { setLoading(false); }
   }
 
-  // ───── totales de la vista
+  // totales
   const totales = useMemo(() => {
-    const total = items.reduce((a,i)=>a + Number(i.total_pagar||0), 0);
-    const pagado = items.reduce((a,i)=>a + Number(i.monto_pagado||0), 0);
+    const total = items.reduce((a,i)=>a + Number(i.total ?? i.total_pagar ?? 0), 0);
+    const pagado = items.reduce((a,i)=>a + (i.pagada ? Number(i.total ?? 0) : 0), 0);
     return { total, pagado, pend: total - pagado };
   }, [items]);
 
-  // ───── crear
+  // crear
   async function crearEstado(e) {
     e?.preventDefault?.();
-    if (!nuevo.tarjeta_id || !nuevo.total_pagar) {
-      warning("Tarjeta y Total a pagar son obligatorios.");
-      return;
-    }
+    if (!nuevo.tarjeta_id || !nuevo.total_pagar) { warning("Tarjeta y Total a pagar son obligatorios."); return; }
     try {
       setSavingNew(true);
       await api.post("/facturas", {
         tarjeta_id: Number(nuevo.tarjeta_id),
         mes: nuevo.mes ? Number(nuevo.mes) : null,
         anio: nuevo.anio ? Number(nuevo.anio) : null,
-        fecha_emision: nuevo.fecha_emision || null,
-        fecha_vencimiento: nuevo.fecha_vencimiento || null,
-        total_pagar: Number(nuevo.total_pagar),
-        pago_minimo: nuevo.pago_minimo !== "" ? Number(nuevo.pago_minimo) : null,
-        nro_estado: (nuevo.nro_estado || "").trim() || null,
+        total: Number(nuevo.total_pagar),
       });
       setNuevo(emptyNuevo);
       await loadEstados();
@@ -151,22 +128,17 @@ export default function FacturacionTarjetas() {
     } finally { setSavingNew(false); }
   }
 
-  // ───── selección → editar
+  // selección → editor
   useEffect(() => {
     if (!sel) return;
     setEdit({
       tarjeta_id: String(sel.tarjeta_id ?? ""),
       mes: String(sel.mes ?? ""),
       anio: String(sel.anio ?? ""),
-      fecha_emision: sel.fecha_emision || "",
-      fecha_vencimiento: sel.fecha_vencimiento || "",
-      total_pagar: String(sel.total_pagar ?? ""),
-      pago_minimo: String(sel.pago_minimo ?? ""),
-      nro_estado: String(sel.nro_estado ?? ""),
-      nota: String(sel.nota ?? ""),
-      pagado: !!sel.pagado,
-      monto_pagado: String(sel.monto_pagado ?? ""),
+      total_pagar: String(sel.total ?? sel.total_pagar ?? ""),
+      pagado: !!sel.pagada,
       fecha_pago: sel.fecha_pago || "",
+      monto_pagado: ""  // opcional si quieres usarlo para sugerencia
     });
   }, [sel]);
 
@@ -177,15 +149,7 @@ export default function FacturacionTarjetas() {
         tarjeta_id: edit.tarjeta_id ? Number(edit.tarjeta_id) : null,
         mes: edit.mes ? Number(edit.mes) : null,
         anio: edit.anio ? Number(edit.anio) : null,
-        fecha_emision: edit.fecha_emision || null,
-        fecha_vencimiento: edit.fecha_vencimiento || null,
-        total_pagar: edit.total_pagar !== "" ? Number(edit.total_pagar) : null,
-        pago_minimo: edit.pago_minimo !== "" ? Number(edit.pago_minimo) : null,
-        nro_estado: (edit.nro_estado || "").trim() || null,
-        nota: (edit.nota || "").trim() || null,
-        pagado: !!edit.pagado,
-        monto_pagado: edit.monto_pagado !== "" ? Number(edit.monto_pagado) : null,
-        fecha_pago: edit.fecha_pago || null,
+        total: edit.total_pagar !== "" ? Number(edit.total_pagar) : null,
       });
       await loadEstados(); success("Cambios guardados");
     } catch (e) {
@@ -209,9 +173,7 @@ export default function FacturacionTarjetas() {
   async function marcarPagado() {
     if (!sel) return;
     try {
-      const monto = edit.monto_pagado ? Number(edit.monto_pagado) : Number(sel.total_pagar || 0);
-      const fecha = edit.fecha_pago || new Date().toISOString().slice(0,10);
-      await api.post(`/facturas/${sel.id}/pagar`, { monto_pagado:monto, fecha_pago:fecha });
+      await api.put(`/facturas/${sel.id}`, { pagada:true, fecha_pago: edit.fecha_pago || new Date().toISOString().slice(0,10) });
       await loadEstados(); success("Pago registrado");
     } catch (e) {
       error({ title:"No pude registrar el pago", description:fmtError(e) });
@@ -221,33 +183,54 @@ export default function FacturacionTarjetas() {
   async function deshacerPago() {
     if (!sel) return;
     try {
-      await api.put(`/facturas/${sel.id}`, { pagado:false, monto_pagado:null, fecha_pago:null });
+      await api.put(`/facturas/${sel.id}`, { pagada:false, fecha_pago:null });
       await loadEstados(); success("Pago deshecho");
     } catch (e) {
       error({ title:"No pude deshacer el pago", description:fmtError(e) });
     }
   }
 
-  // ───── Detalles (nro_estado + nota) en modal
-  function abrirDetallesDesde(selRow) {
-    const r = selRow || sel || menu.target;
+  // ---- Detalles 1:1
+  function abrirDetallesDesde(rowSel) {
+    const r = rowSel || sel || menu.target;
     if (!r) { warning("Primero selecciona un estado."); return; }
-    setDetNro(String(r.nro_estado ?? ""));
-    setDetNota(String(r.nota ?? ""));
     setMenu(m=>({ ...m, show:false }));
-    setDetOpen(true);
+    cargarDetalle(r.id);
   }
+
+  async function cargarDetalle(id) {
+    try {
+      const { data } = await api.get(`/facturas/${id}/detalle`);
+      const detData = data?.data ?? data ?? {};
+      setDet({
+        fecha_emision: detData.fecha_emision || "",
+        fecha_vencimiento: detData.fecha_vencimiento || "",
+        pago_minimo: detData.pago_minimo !== null && detData.pago_minimo !== undefined ? String(detData.pago_minimo) : "",
+        monto_pagado: detData.monto_pagado !== null && detData.monto_pagado !== undefined ? String(detData.monto_pagado) : "",
+        nro_estado: detData.nro_estado || "",
+        nota: detData.nota || "",
+      });
+      setDetOpen(true);
+    } catch (e) {
+      error({ title:"No pude cargar detalle", description:fmtError(e) });
+    }
+  }
+
   async function guardarDetalles() {
     if (!sel && !menu.target) return;
     const id = sel?.id ?? menu.target?.id;
     if (!id) return;
     try {
       setDetBusy(true);
-      await api.put(`/facturas/${id}`, {
-        nro_estado: (detNro || "").trim() || null,
-        nota: (detNota || "").trim() || null
+      await api.put(`/facturas/${id}/detalle`, {
+        fecha_emision: det.fecha_emision || null,
+        fecha_vencimiento: det.fecha_vencimiento || null,
+        pago_minimo: det.pago_minimo !== "" ? Number(det.pago_minimo) : null,
+        monto_pagado: det.monto_pagado !== "" ? Number(det.monto_pagado) : null,
+        nro_estado: (det.nro_estado || "").trim() || null,
+        nota: (det.nota || "").trim() || null,
       });
-      setDetOpen(false); await loadEstados();
+      setDetOpen(false);
       success("Detalles guardados");
     } catch (e) {
       error({ title:"No pude guardar el detalle", description:fmtError(e) });
@@ -257,7 +240,7 @@ export default function FacturacionTarjetas() {
   return (
     <AppShell title="Facturación tarjetas" actions={<button style={ui.btn} onClick={loadEstados}>Actualizar</button>}>
 
-      {/* Vista contable (Mes, Año, Tarjeta) */}
+      {/* Vista */}
       <div style={ui.card}>
         <div style={{ fontWeight:700, marginBottom:12 }}>📅 Vista contable</div>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 2fr", gap:10, alignItems:"end" }}>
@@ -272,12 +255,10 @@ export default function FacturacionTarjetas() {
             </L>
           </div>
 
-          {/* Totales al centro */}
           <div style={{ opacity:.9, alignSelf:"center" }}>
             Totales: pagado {fmtCLP(totales.pagado)} / total {fmtCLP(totales.total)} · pendiente <b>{fmtCLP(totales.pend)}</b>
           </div>
 
-          {/* Filtro de Tarjeta a la derecha */}
           <div style={{ justifySelf:"end", width:"100%", maxWidth:380 }}>
             <L label="Tarjeta (filtro)">
               <select value={fTarjeta} onChange={(e)=>setFTarjeta(e.target.value)} style={styles.input}>
@@ -290,7 +271,7 @@ export default function FacturacionTarjetas() {
         {err && <div style={{ marginTop:10, ...styles.error }}>{err}</div>}
       </div>
 
-      {/* Agregar estado */}
+      {/* Agregar */}
       <div style={ui.card}>
         <div style={{ fontWeight:700, marginBottom:12 }}>➕ Agregar estado</div>
         <form onSubmit={crearEstado} style={{ display:"grid", gridTemplateColumns:"1.6fr .8fr .8fr 1fr 1fr auto", gap:10, alignItems:"end" }}>
@@ -306,7 +287,7 @@ export default function FacturacionTarjetas() {
             </select>
           </L>
           <L label="Año"><input type="number" value={nuevo.anio} onChange={e=>setNuevo({ ...nuevo, anio:e.target.value })} style={styles.input}/></L>
-          <L label="Emisión"><input type="date" value={nuevo.fecha_emision} onChange={e=>setNuevo({ ...nuevo, fecha_emision:e.target.value })} style={styles.input}/></L>
+          <L label="Emisión (opcional)"><input type="date" value={nuevo.fecha_emision} onChange={e=>setNuevo({ ...nuevo, fecha_emision:e.target.value })} style={styles.input}/></L>
           <L label="Total Facturado"><input type="number" value={nuevo.total_pagar} onChange={e=>setNuevo({ ...nuevo, total_pagar:e.target.value })} style={styles.input}/></L>
           <button type="submit" style={ui.btn} disabled={savingNew}>{savingNew ? "Guardando..." : "Guardar"}</button>
         </form>
@@ -338,14 +319,9 @@ export default function FacturacionTarjetas() {
                   </thead>
                   <tbody>
                     {items.map(r => {
-                      const total = Number(r.total_pagar ?? r.total ?? r.monto_total ?? 0);
-                      const pagada =
-                        typeof r.pagada !== "undefined"
-                          ? (r.pagada === true || r.pagada === 1 || r.pagada === "1")
-                          : (Number(r.monto_pagado ?? 0) >= total && total > 0);
-
+                      const total = Number(r.total ?? r.total_pagar ?? 0);
+                      const pagada = !!r.pagada;
                       const selected = sel?.id === r.id;
-
                       return (
                         <tr
                           key={r.id}
@@ -355,7 +331,7 @@ export default function FacturacionTarjetas() {
                           title="Click o clic derecho para acciones"
                         >
                           <td style={styles.td}>{r.id}</td>
-                          <td style={styles.td}>{r.tarjeta_nombre || tarjetaLabel({ ...r, id: r.tarjeta_id })}</td>
+                          <td style={styles.td}>{r.tarjeta || r.tarjeta_nombre || tarjetaLabel({ ...r, id:r.tarjeta_id })}</td>
                           <td style={styles.td}>{MESES[r.mes] || "—"}</td>
                           <td style={styles.td}>{r.anio ?? "—"}</td>
                           <td style={styles.td}>{fmtCLP(total)}</td>
@@ -370,13 +346,13 @@ export default function FacturacionTarjetas() {
             </div>
 
             <div style={{ fontSize:12, opacity:.7, marginTop:8 }}>
-              Tip: clic en una fila para editar, eliminar o marcar/deshacer pago.
+              Tip: clic en una fila para **ver detalles**, editar o eliminar.
             </div>
           </>
         )}
       </div>
 
-      {/* Menú contextual (flotante, fuera de la tarjeta) */}
+      {/* Menú contextual */}
       {menu.show && (
         <div
           ref={menuRef}
@@ -387,7 +363,7 @@ export default function FacturacionTarjetas() {
           }}
         >
           <div style={{ padding:10, borderBottom:"1px solid #1f2a44", fontSize:12, opacity:.8 }}>
-            ID {menu.target?.id} — {menu.target?.tarjeta_nombre || tarjetaLabel({ ...menu.target, id:menu.target?.tarjeta_id })}
+            ID {menu.target?.id} — {menu.target?.tarjeta || tarjetaLabel({ ...menu.target, id:menu.target?.tarjeta_id })}
           </div>
           <button onClick={()=>abrirDetallesDesde(menu.target)} style={styles.menuItem}>📄 Ver detalles</button>
           <button onClick={()=>openEditor()} style={{ ...styles.menuItem, borderTop:"1px solid #1f2a44" }}>✏️ Editar / Eliminar</button>
@@ -409,8 +385,7 @@ export default function FacturacionTarjetas() {
             </button>
           </div>
 
-          {/* Grid de edición */}
-          <div style={{ display:"grid", gridTemplateColumns:"1.2fr .7fr .7fr 1fr 1fr auto auto", gap:10, alignItems:"end" }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1.2fr .7fr .7fr 1fr auto auto", gap:10, alignItems:"end" }}>
             <L label="Tarjeta">
               <select value={edit.tarjeta_id} onChange={e=>setEdit({ ...edit, tarjeta_id:e.target.value })} style={styles.input}>
                 <option value="">—</option>
@@ -429,24 +404,17 @@ export default function FacturacionTarjetas() {
             <Button variant="danger" onClick={eliminarEstado} size="md">Eliminar</Button>
           </div>
 
-          {/* Registrar pago */}
+          {/* Pago */}
           <div style={{ marginTop:16 }}>
-            <div style={{ fontWeight:700, marginBottom:8 }}>💳 Registrar pago del estado</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10, alignItems:"end", marginBottom:10 }}>
-              <L label="Monto pagado"><input type="number" value={edit.monto_pagado} onChange={e=>setEdit({ ...edit, monto_pagado:e.target.value })} style={styles.input}/></L>
+            <div style={{ fontWeight:700, marginBottom:8 }}>💳 Pago del estado</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, alignItems:"end", marginBottom:10 }}>
               <L label="Fecha pago"><input type="date" value={edit.fecha_pago} onChange={e=>setEdit({ ...edit, fecha_pago:e.target.value })} style={styles.input}/></L>
             </div>
-
             <div style={{ display:"flex", gap:10 }}>
               <button type="button" onClick={marcarPagado} style={{ ...ui.btn, background:"#1e90ff" }}>
-                Marcar estado pagado ({fmtCLP(edit.monto_pagado || sel.total_pagar)})
+                Marcar estado pagado
               </button>
-              <button
-                type="button"
-                onClick={deshacerPago}
-                style={{ ...ui.btn, background:"#6c757d", opacity: sel?.monto_pagado ? 1 : .7 }}
-                disabled={!sel?.monto_pagado}
-              >
+              <button type="button" onClick={deshacerPago} style={{ ...ui.btn, background:"#6c757d", opacity: sel?.pagada ? 1 : .7 }} disabled={!sel?.pagada}>
                 Deshacer pago
               </button>
               <button type="button" onClick={()=>abrirDetallesDesde(sel)} style={{ ...ui.btn, background:"#0ec3cc" }}>📄 Detalles</button>
@@ -459,10 +427,14 @@ export default function FacturacionTarjetas() {
       {detOpen && (
         <div style={styles.modalBackdrop} onClick={()=>setDetOpen(false)}>
           <div style={styles.modal} onClick={(e)=>e.stopPropagation()}>
-            <div style={{ fontWeight:700, marginBottom:12 }}>📄 Detalles del estado</div>
-            <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:10 }}>
-              <L label="Nº estado"><input style={styles.input} value={detNro} onChange={e=>setDetNro(e.target.value)}/></L>
-              <L label="Nota"><input style={styles.input} value={detNota} onChange={e=>setDetNota(e.target.value)}/></L>
+            <div style={{ fontWeight:700, marginBottom:12 }}>📄 Detalles de la factura</div>
+            <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:10 }}>
+              <L label="Fecha emisión"><input type="date" style={styles.input} value={det.fecha_emision} onChange={e=>setDet(d=>({ ...d, fecha_emision:e.target.value }))}/></L>
+              <L label="Fecha vencimiento"><input type="date" style={styles.input} value={det.fecha_vencimiento} onChange={e=>setDet(d=>({ ...d, fecha_vencimiento:e.target.value }))}/></L>
+              <L label="Pago mínimo"><input type="number" style={styles.input} value={det.pago_minimo} onChange={e=>setDet(d=>({ ...d, pago_minimo:e.target.value }))}/></L>
+              <L label="Monto pagado (opcional)"><input type="number" style={styles.input} value={det.monto_pagado} onChange={e=>setDet(d=>({ ...d, monto_pagado:e.target.value }))}/></L>
+              <L label="Nº estado"><input style={styles.input} value={det.nro_estado} onChange={e=>setDet(d=>({ ...d, nro_estado:e.target.value }))}/></L>
+              <L label="Nota"><input style={styles.input} value={det.nota} onChange={e=>setDet(d=>({ ...d, nota:e.target.value }))}/></L>
             </div>
             <div style={{ display:"flex", gap:10, justifyContent:"flex-end", marginTop:14 }}>
               <button type="button" onClick={()=>setDetOpen(false)} style={{ ...ui.btn, background:"#6c757d" }}>Cerrar</button>
@@ -484,8 +456,10 @@ const styles = {
   error:{ background:"#ff3b30", color:"#fff", padding:"6px 10px", borderRadius:8 },
   menuItem:{ display:"block", width:"100%", textAlign:"left", padding:"10px 12px", background:"transparent", color:"#e6f0ff", border:0, cursor:"pointer" },
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
-  modal:{ width:"min(800px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
+  modal:{ width:"min(860px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
+
+
 
 
 

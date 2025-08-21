@@ -86,6 +86,11 @@ class PrestamoOut(BaseModel):
     finalizado: bool
     vence_en_mes: bool = False  # se marca si cae en el mes/anio filtrado
 
+# Body opcional para /pagar (permite enviar {} sin romper validación)
+class PagarPayload(BaseModel):
+    mes_contable: Optional[int] = Field(default=None, ge=1, le=12)
+    anio_contable: Optional[int] = Field(default=None, ge=1900, le=2100)
+
 # Fallback local por si no usas el import de get_db anterior
 def get_db():
     db = SessionLocal()
@@ -172,6 +177,22 @@ def listar_prestamos(
         }
     }
 
+# *** NUEVA RUTA DE COMPATIBILIDAD ***
+@router.get("/resumen", response_model=List[PrestamoOut])
+def listar_prestamos_resumen(
+    mes: Optional[int] = Query(None, ge=1, le=12),
+    anio: Optional[int] = Query(None, ge=1900, le=2100),
+    db: Session = Depends(get_db),
+    _user=Depends(get_current_user)
+):
+    """
+    Ruta de compatibilidad para el frontend actual.
+    Devuelve **solo el array** de préstamos (equivalente a 'items' de GET /prestamos).
+    """
+    prestamos = db.query(Prestamo).order_by(Prestamo.created_at.desc()).all()
+    items: List[PrestamoOut] = [build_out(p, mes, anio) for p in prestamos]
+    return items
+
 @router.post("", response_model=PrestamoOut)
 def crear_prestamo(
     data: PrestamoCreate,
@@ -228,6 +249,7 @@ def actualizar_prestamo(
 @router.post("/{pid}/pagar", response_model=PrestamoOut)
 def pagar_cuota(
     pid: int,
+    _payload: Optional[PagarPayload] = None,  # acepta {} o nada
     db: Session = Depends(get_db),
     _user=Depends(get_current_user)
 ):
@@ -323,3 +345,4 @@ def registrar_pago(
     except Exception as e:
         # índice único o cualquier otra restricción
         raise HTTPException(400, f"No se pudo registrar el pago: {e}")
+

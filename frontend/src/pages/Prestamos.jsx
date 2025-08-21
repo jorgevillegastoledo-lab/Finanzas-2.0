@@ -42,6 +42,15 @@ const emptyDetalle = {
   tags: "", nota: ""
 };
 
+// ---------- util local para calcular último mes/año pagado ----------
+function addMonths(y, m, add) {
+  // y: año (int), m: mes 1-12 (int)
+  const total = (y * 12 + (m - 1)) + add;
+  const ny = Math.floor(total / 12);
+  const nm = (total % 12) + 1;
+  return { anio: ny, mes: nm };
+}
+
 export default function Prestamos() {
   const { success, error, warning } = useToast();
   const confirm = useConfirm();
@@ -143,7 +152,24 @@ export default function Prestamos() {
     try {
       setLoading(true); setErr("");
       const { data } = await api.get("/prestamos/resumen");
-      const arr = Array.isArray(data) ? data : (data?.data ?? []);
+      const raw = Array.isArray(data) ? data : (data?.data ?? []);
+      // ---- Mapeo para compatibilidad visual con el backup ----
+      const arr = raw.map(p => {
+        const mapped = {
+          ...p,
+          total_pagado: p.total_pagado ?? p.monto_pagado ?? 0,
+          deuda_restante: p.deuda_restante ?? p.saldo_restante ?? 0,
+        };
+        // Si no vienen ultimo_mes/ultimo_anio, los calculamos desde cuotas_pagadas
+        if ((mapped.ultimo_mes == null || mapped.ultimo_anio == null)
+            && mapped.cuotas_pagadas > 0
+            && mapped.primer_mes && mapped.primer_anio) {
+          const { anio, mes } = addMonths(Number(mapped.primer_anio), Number(mapped.primer_mes), Number(mapped.cuotas_pagadas) - 1);
+          mapped.ultimo_mes = mes;
+          mapped.ultimo_anio = anio;
+        }
+        return mapped;
+      });
       setItems(arr);
       if (sel) setSel(arr.find(x => x.id === sel.id) || null);
     } catch (e) {
@@ -269,7 +295,7 @@ export default function Prestamos() {
     }
   }
 
-  // Pago de cuota (cuota fija = valor_cuota; no se envía body)
+  // Pago de cuota (enviar body como en el backup)
   async function marcarPago() {
     if (!sel) return;
     if (!pagoMes || !pagoAnio) {
@@ -277,7 +303,12 @@ export default function Prestamos() {
       return;
     }
     try {
-      await api.post(`/prestamos/${sel.id}/pagar`);
+      await api.post(`/prestamos/${sel.id}/pagar`, {
+        mes_contable: Number(pagoMes),
+        anio_contable: Number(pagoAnio)
+        // Si alguna vez quieres permitir monto distinto:
+        // , monto_pagado: Number(sel.valor_cuota)
+      });
       await listar();
       success(`Pago registrado por ${fmtCLP(sel.valor_cuota)}.`);
     } catch (e) {
@@ -288,6 +319,8 @@ export default function Prestamos() {
   async function deshacerPago() {
     if (!sel) return;
     try {
+      // puede ir sin body; si prefieres, usa {} para que Axios siempre mande JSON:
+      // await api.post(`/prestamos/${sel.id}/deshacer`, {});
       await api.post(`/prestamos/${sel.id}/deshacer`);
       await listar();
       success("Se deshizo el último pago.");
@@ -718,6 +751,4 @@ const styles = {
   modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 40, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
   modal: { width: "min(1100px, 96vw)", background: "#0b1322", border: "1px solid #1f2a44", borderRadius: 12, padding: 16, boxShadow: "0 40px 120px rgba(0,0,0,.55)" },
 };
-
-
 
