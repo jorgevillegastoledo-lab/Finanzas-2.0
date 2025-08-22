@@ -4,47 +4,23 @@ import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 import { useToast, useConfirm } from "../ui/notifications";
 
-const MESES = [
-  "",
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-];
+const MESES = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 const hoy = new Date();
 const MES_ACTUAL = hoy.getMonth() + 1;
 const ANIO_ACTUAL = hoy.getFullYear();
 
-const fmtCLP = (n) =>
-  new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 })
-    .format(Number(n || 0));
-
+const fmtCLP = (n) => new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(n || 0));
 const fmtError = (e) => e?.response?.data?.detail || e?.message || String(e);
 
-// Etiqueta arriba del campo
 const L = ({ label, children }) => (
   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-    <span style={{ fontSize: 12, color: "#9db7d3", opacity: 0.9, padding: "0 2px" }}>
-      {label}
-    </span>
+    <span style={{ fontSize: 12, color: "#9db7d3", opacity: 0.9, padding: "0 2px" }}>{label}</span>
     {children}
   </div>
 );
 
-/* ---------- Detalle (UI state "vacío") --------- */
-const emptyDetalle = {
-  banco: "", numero_contrato: "", fecha_otorgamiento: "", monto_original: "", moneda: "",
-  plazo_meses: "", dia_vencimiento: "", tasa_interes_anual: "", tipo_tasa: "", indice_reajuste: "",
-  primera_cuota: "",
-  ejecutivo_nombre: "", ejecutivo_email: "", ejecutivo_fono: "",
-  seguro_desgravamen: false, seguro_cesantia: false, costo_seguro_mensual: "", comision_administracion: "",
-  prepago_permitido: false, prepago_costo: "",
-  garantia_tipo: "", garantia_descripcion: "", garantia_hasta: "",
-  liquido_recibido: "", gastos_iniciales_total: "",
-  tags: "", nota: ""
-};
-
-// ---------- util local para calcular último mes/año pagado ----------
+/* ---------- util ---------- */
 function addMonths(y, m, add) {
-  // y: año (int), m: mes 1-12 (int)
   const total = (y * 12 + (m - 1)) + add;
   const ny = Math.floor(total / 12);
   const nm = (total % 12) + 1;
@@ -65,15 +41,11 @@ export default function Prestamos() {
   const [err, setErr] = useState("");
 
   // Crear préstamo
-  const [nuevo, setNuevo] = useState({
-    nombre: "", valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: ""
-  });
+  const [nuevo, setNuevo] = useState({ nombre: "", valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: "" });
 
   // Selección / edición
   const [sel, setSel] = useState(null);
-  const [edit, setEdit] = useState({
-    valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: ""
-  });
+  const [edit, setEdit] = useState({ valor_cuota: "", cuotas_totales: "", primer_mes: "", primer_anio: "", banco: "" });
   const editRef = useRef(null);
 
   // Registrar pago (cuota fija)
@@ -103,8 +75,7 @@ export default function Prestamos() {
   }, []);
 
   const openMenu = (e, row) => {
-    e.preventDefault?.();
-    e.stopPropagation?.();
+    e.preventDefault?.(); e.stopPropagation?.();
     setMenu({ show: true, x: e.clientX, y: e.clientY, target: row, openedAt: Date.now() });
   };
 
@@ -116,6 +87,14 @@ export default function Prestamos() {
   };
 
   /* -------- Detalle (modal) ---------- */
+  const emptyDetalle = {
+    banco: "", numero_contrato: "", fecha_otorgamiento: "", monto_original: "", moneda: "",
+    plazo_meses: "", dia_vencimiento: "", tasa_interes_anual: "", tipo_tasa: "", indice_reajuste: "",
+    primera_cuota: "", ejecutivo_nombre: "", ejecutivo_email: "", ejecutivo_fono: "",
+    seguro_desgravamen: false, seguro_cesantia: false, costo_seguro_mensual: "", comision_administracion: "",
+    prepago_permitido: false, prepago_costo: "", garantia_tipo: "", garantia_descripcion: "", garantia_hasta: "",
+    liquido_recibido: "", gastos_iniciales_total: "", tags: "", nota: ""
+  };
   const [detOpen, setDetOpen] = useState(false);
   const [detBusy, setDetBusy] = useState(false);
   const [detalle, setDetalle] = useState(emptyDetalle);
@@ -153,20 +132,17 @@ export default function Prestamos() {
       setLoading(true); setErr("");
       const { data } = await api.get("/prestamos/resumen");
       const raw = Array.isArray(data) ? data : (data?.data ?? []);
-      // ---- Mapeo para compatibilidad visual con el backup ----
       const arr = raw.map(p => {
         const mapped = {
           ...p,
           total_pagado: p.total_pagado ?? p.monto_pagado ?? 0,
           deuda_restante: p.deuda_restante ?? p.saldo_restante ?? 0,
         };
-        // Si no vienen ultimo_mes/ultimo_anio, los calculamos desde cuotas_pagadas
         if ((mapped.ultimo_mes == null || mapped.ultimo_anio == null)
             && mapped.cuotas_pagadas > 0
             && mapped.primer_mes && mapped.primer_anio) {
           const { anio, mes } = addMonths(Number(mapped.primer_anio), Number(mapped.primer_mes), Number(mapped.cuotas_pagadas) - 1);
-          mapped.ultimo_mes = mes;
-          mapped.ultimo_anio = anio;
+          mapped.ultimo_mes = mes; mapped.ultimo_anio = anio;
         }
         return mapped;
       });
@@ -192,7 +168,7 @@ export default function Prestamos() {
     deuda: itemsFiltrados.reduce((a, p) => a + Number(p.deuda_restante || 0), 0),
   }), [itemsFiltrados]);
 
-  // ---- Bloqueo estricto (Política A) ----
+  // Bloqueo de edición sensible si ya tiene pagos
   const locked = useMemo(() => {
     if (!sel) return false;
     const qp = Number(sel.cuotas_pagadas ?? 0);
@@ -246,23 +222,17 @@ export default function Prestamos() {
 
   async function guardarCambios() {
     if (!sel) return;
-
     if (locked && sensitiveChangesPresent()) {
-      warning("Este préstamo ya tiene pagos registrados. No puedes editar valor de cuota, cuotas totales ni la fecha inicial (mes/año). Elimina y vuelve a crear si el alta tuvo un error.");
+      warning("Este préstamo ya tiene pagos registrados. No puedes editar valor de cuota, cuotas totales ni la fecha inicial (mes/año).");
       return;
     }
-
-    const payload = {
-      nombre: sel.nombre,
-      banco: edit.banco || null,
-    };
+    const payload = { nombre: sel.nombre, banco: edit.banco || null };
     if (!locked) {
       if (edit.valor_cuota !== "") payload.valor_cuota = Number(edit.valor_cuota);
       if (edit.cuotas_totales !== "") payload.cuotas_totales = Number(edit.cuotas_totales);
       if (edit.primer_mes !== "") payload.primer_mes = Number(edit.primer_mes);
       if (edit.primer_anio !== "") payload.primer_anio = Number(edit.primer_anio);
     }
-
     try {
       await api.put(`/prestamos/${sel.id}`, payload);
       await listar();
@@ -276,39 +246,51 @@ export default function Prestamos() {
     }
   }
 
-  async function eliminarPrestamo() {
+  // --- NUEVO: Anular (soft delete) ---
+  async function anularPrestamo() {
     if (!sel) return;
     const ok = await confirm({
-      title: "¿Eliminar préstamo?",
-      message: "Se eliminarán también sus pagos registrados. Esta acción no se puede deshacer.",
-      confirmText: "Eliminar",
+      title: "¿Anular préstamo?",
+      message: "No se eliminarán pagos porque no hay. Podrás crearlo de nuevo si fue un error.",
+      confirmText: "Anular",
       tone: "danger",
     });
     if (!ok) return;
     try {
-      await api.delete(`/prestamos/${sel.id}`);
+      await api.post(`/prestamos/${sel.id}/anular`, { motivo: "Anulado desde UI" });
       setSel(null);
       await listar();
-      success("Préstamo eliminado");
+      success("Préstamo anulado");
     } catch (e) {
-      error({ title: "No pude eliminar el préstamo", description: fmtError(e) });
+      error({ title: "No pude anular el préstamo", description: fmtError(e) });
     }
   }
 
-  // Pago de cuota (enviar body como en el backup)
+  // --- NUEVO: Cerrar anticipadamente ---
+  async function cerrarAnticipado() {
+    if (!sel) return;
+    const ok = await confirm({
+      title: "¿Cerrar anticipadamente?",
+      message: "Ajustará cuotas totales a las ya pagadas y dejará la deuda en $0. No borra pagos.",
+      confirmText: "Cerrar",
+      tone: "primary",
+    });
+    if (!ok) return;
+    try {
+      await api.post(`/prestamos/${sel.id}/cerrar-anticipado`);
+      await listar();
+      success("Préstamo cerrado anticipadamente");
+    } catch (e) {
+      error({ title: "No pude cerrar anticipadamente", description: fmtError(e) });
+    }
+  }
+
+  // Pago de cuota
   async function marcarPago() {
     if (!sel) return;
-    if (!pagoMes || !pagoAnio) {
-      warning("Selecciona mes y año contable del pago.");
-      return;
-    }
+    if (!pagoMes || !pagoAnio) { warning("Selecciona mes y año contable del pago."); return; }
     try {
-      await api.post(`/prestamos/${sel.id}/pagar`, {
-        mes_contable: Number(pagoMes),
-        anio_contable: Number(pagoAnio)
-        // Si alguna vez quieres permitir monto distinto:
-        // , monto_pagado: Number(sel.valor_cuota)
-      });
+      await api.post(`/prestamos/${sel.id}/pagar`, { mes_contable: Number(pagoMes), anio_contable: Number(pagoAnio) });
       await listar();
       success(`Pago registrado por ${fmtCLP(sel.valor_cuota)}.`);
     } catch (e) {
@@ -318,14 +300,26 @@ export default function Prestamos() {
 
   async function deshacerPago() {
     if (!sel) return;
+
+    // *** Confirmación añadida (igual que Gastos, adaptando el texto) ***
+    const ok = await confirm({
+      title: "Deshacer pago",
+      message: "Se eliminará el último registro de pago y el préstamo quedará como NO pagado si no hay pagos restantes.",
+      confirmText: "Deshacer",
+      tone: "warning",
+    });
+    if (!ok) return;
+
     try {
-      // puede ir sin body; si prefieres, usa {} para que Axios siempre mande JSON:
-      // await api.post(`/prestamos/${sel.id}/deshacer`, {});
       await api.post(`/prestamos/${sel.id}/deshacer`);
       await listar();
       success("Se deshizo el último pago.");
     } catch (e) {
-      error({ title: "No pude deshacer el pago", description: fmtError(e) });
+      if (e?.response?.status === 409) {
+        warning(e?.response?.data?.detail || "El período contable está cerrado. No se puede deshacer.");
+      } else {
+        error({ title: "No pude deshacer el pago", description: fmtError(e) });
+      }
     }
   }
 
@@ -353,9 +347,7 @@ export default function Prestamos() {
         liquido_recibido: d.liquido_recibido ?? "", gastos_iniciales_total: d.gastos_iniciales_total ?? "",
         tags: d.tags ?? "", nota: d.nota ?? ""
       });
-    } catch {
-      /* sin detalle */
-    }
+    } catch { /* sin detalle */ }
   }
 
   async function guardarDetalle() {
@@ -517,7 +509,7 @@ export default function Prestamos() {
                   ID {menu.target?.id} — {menu.target?.nombre}
                 </div>
                 <button onClick={() => abrirDetalle(menu.target?.id)} style={styles.menuItem}>📄 Ver detalles</button>
-                <button onClick={() => openEditor()} style={{ ...styles.menuItem, borderTop: "1px solid #1f2a44" }}>✏️ Editar / Eliminar</button>
+                <button onClick={() => openEditor()} style={{ ...styles.menuItem, borderTop: "1px solid #1f2a44" }}>✏️ Editar / Acciones</button>
               </div>
             )}
 
@@ -539,16 +531,11 @@ export default function Prestamos() {
             </button>
           </div>
 
-          {/* Aviso de bloqueo si ya tiene pagos */}
+          {/* Aviso de bloqueo */}
           {locked && (
-            <div style={{
-              marginBottom: 12, padding: "8px 10px",
-              background: "#3a2d00", color: "#ffd666",
-              border: "1px solid #4d3b00", borderRadius: 8, fontSize: 13
-            }}>
+            <div style={{ marginBottom: 12, padding: "8px 10px", background: "#3a2d00", color: "#ffd666", border: "1px solid #4d3b00", borderRadius: 8, fontSize: 13 }}>
               Este préstamo ya tiene pagos registrados (<b>{sel.cuotas_pagadas ?? 0}</b>).
               No puedes editar <i>valor de cuota</i>, <i>cuotas totales</i> ni la <i>fecha inicial (mes/año)</i>.
-              Si el alta tuvo un error, elimina el préstamo y créalo nuevamente con los valores correctos.
             </div>
           )}
 
@@ -557,9 +544,19 @@ export default function Prestamos() {
             <button type="button" onClick={() => abrirDetalle(sel.id)} style={{ ...ui.btn, background: "#0ec3cc" }}>
               📄 Detalles
             </button>
+
             <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
+              {/* NUEVOS botones según estado */}
+              {(sel.cuotas_pagadas || 0) === 0 ? (
+                <button onClick={anularPrestamo} style={{ ...ui.btn, background: "#ff3b30" }}>
+                  Anular préstamo
+                </button>
+              ) : (
+                <button onClick={cerrarAnticipado} style={{ ...ui.btn, background: "#7c4dff" }}>
+                  Cerrar anticipadamente
+                </button>
+              )}
               <button onClick={guardarCambios} style={ui.btn}>Guardar cambios</button>
-              <button onClick={eliminarPrestamo} style={{ ...ui.btn, background: "#ff3b30" }}>Eliminar</button>
             </div>
           </div>
 
@@ -751,4 +748,3 @@ const styles = {
   modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 40, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
   modal: { width: "min(1100px, 96vw)", background: "#0b1322", border: "1px solid #1f2a44", borderRadius: 12, padding: 16, boxShadow: "0 40px 120px rgba(0,0,0,.55)" },
 };
-

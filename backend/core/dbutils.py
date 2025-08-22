@@ -22,12 +22,12 @@ os.environ.setdefault("PGSYSCONFDIR", str(SAFE_DIR))
 os.environ.setdefault("PGSERVICEFILE", str(SAFE_DIR / "pg_service.conf"))
 os.environ.setdefault("PGPASSFILE", str(SAFE_DIR / "pgpass.conf"))
 os.environ.setdefault("PGCLIENTENCODING", "utf8")
-os.environ.pop("DATABASE_URL", None)  # evita conflictos con libpq
+os.environ.pop("DATABASE_URL", None)
 
 # ------------------------------- Conexión --------------------------------
 DEFAULT_DBNAME = os.getenv("PGDATABASE", "finanzas")
 DEFAULT_USER   = os.getenv("PGUSER", "postgres")
-DEFAULT_PASS   = os.getenv("PGPASSWORD", "Kokeman29")  # cambia si aplica
+DEFAULT_PASS   = os.getenv("PGPASSWORD", "Kokeman29")  # ajusta si aplica
 DEFAULT_HOST   = os.getenv("PGHOST", "localhost")
 DEFAULT_PORT   = int(os.getenv("PGPORT", "5432"))
 
@@ -39,7 +39,7 @@ def get_conn():
         )
         conn.autocommit = True
         return conn
-    except Exception as e:
+    except Exception:
         logging.getLogger("uvicorn.error").exception("Fallo de conexión a PostgreSQL")
         raise
 
@@ -73,13 +73,6 @@ def get_column_type(conn, table: str, column: str) -> Optional[str]:
         return row[0] if row else None
 
 # ---------------------------- ensure_* helpers ---------------------------
-def ensure_prestamo_detalle_support(conn):
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_prestamo_detalle_prestamo_id
-            ON public.prestamo_detalle (prestamo_id);
-        """)
-
 def ensure_facturas_table(conn):
     with conn.cursor() as cur:
         cur.execute("""
@@ -98,6 +91,42 @@ def ensure_facturas_table(conn):
         cur.execute("ALTER TABLE facturas ADD COLUMN IF NOT EXISTS pagada BOOLEAN NOT NULL DEFAULT FALSE;")
         cur.execute("ALTER TABLE facturas ADD COLUMN IF NOT EXISTS fecha_pago DATE NULL;")
         cur.execute("ALTER TABLE facturas ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW();")
+
+def ensure_factura_detalle_table(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS factura_detalle (
+                id SERIAL PRIMARY KEY,
+                factura_id INTEGER NOT NULL REFERENCES facturas(id) ON DELETE CASCADE,
+                fecha_emision DATE,
+                fecha_vencimiento DATE,
+                pago_minimo NUMERIC(14,2),
+                monto_pagado NUMERIC(14,2),
+                nro_estado TEXT,
+                nota TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+        """)
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_factura_detalle_factura_id
+            ON factura_detalle (factura_id);
+        """)
+
+def ensure_factura_pagos_table(conn):
+    """Un (1) pago por factura."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS factura_pagos (
+                id SERIAL PRIMARY KEY,
+                factura_id INTEGER NOT NULL REFERENCES facturas(id) ON DELETE CASCADE,
+                fecha_pago DATE NOT NULL DEFAULT CURRENT_DATE,
+                monto NUMERIC(14,2) NOT NULL,
+                nota TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                UNIQUE (factura_id)
+            );
+        """)
 
 def ensure_pagos_prestamo_table(conn):
     with conn.cursor() as cur:
@@ -236,7 +265,67 @@ def recompute_prestamo_totales(conn, prestamo_id: int):
             cur.execute(f"UPDATE prestamos SET {', '.join(sets)} WHERE id = %s",
                         params + [prestamo_id])
 
-# core/dbutils.py  (ADICIONAR esta función)
+def ensure_prestamo_detalle_support(conn):
+    """
+    Asegura la tabla prestamo_detalle (1:1 con prestamos) y su índice único.
+    Es segura para ejecutar múltiples veces.
+    """
+    with conn.cursor() as cur:
+        # Crea la tabla si no existe (campos "amplios" para que no te falte nada)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS prestamo_detalle (
+                id SERIAL PRIMARY KEY,
+                prestamo_id INTEGER NOT NULL REFERENCES prestamos(id) ON DELETE CASCADE,
+
+                banco TEXT,
+                numero_contrato TEXT,
+                fecha_otorgamiento DATE,
+                monto_original NUMERIC(14,2),
+                moneda TEXT,
+                plazo_meses INTEGER,
+                dia_vencimiento INTEGER,
+                tasa_interes_anual NUMERIC(8,4),
+                tipo_tasa TEXT,
+                indice_reajuste TEXT,
+                primera_cuota DATE,
+
+                ejecutivo_nombre TEXT,
+                ejecutivo_email TEXT,
+                ejecutivo_fono TEXT,
+
+                seguro_desgravamen BOOLEAN,
+                seguro_cesantia BOOLEAN,
+                costo_seguro_mensual NUMERIC(14,2),
+                comision_administracion NUMERIC(14,2),
+
+                prepago_permitido BOOLEAN,
+                prepago_costo NUMERIC(14,2),
+
+                garantia_tipo TEXT,
+                garantia_descripcion TEXT,
+                garantia_hasta DATE,
+
+                liquido_recibido NUMERIC(14,2),
+                gastos_iniciales_total NUMERIC(14,2),
+
+                tags TEXT,
+                nota TEXT,
+
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        # Índice único 1:1 con prestamos
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_prestamo_detalle_prestamo_id
+            ON public.prestamo_detalle (prestamo_id);
+        """)
+
+
+
+
+# ----------------------- Factura Detalle (1:1) -----------------------
 def ensure_factura_detalle_table(conn):
     with conn.cursor() as cur:
         cur.execute("""
@@ -257,3 +346,4 @@ def ensure_factura_detalle_table(conn):
             CREATE UNIQUE INDEX IF NOT EXISTS uq_factura_detalle_factura_id
             ON factura_detalle (factura_id);
         """)
+

@@ -50,16 +50,15 @@ function metodoDesdeUI(fp_ui) {
   return "efectivo";
 }
 
-// Usa el endpoint nuevo del backend: POST /gastos/:id/pagar
-// payload esperado: { gasto_id, fecha, monto, metodo, tarjeta_id }
+// Usa el endpoint del backend: POST /gastos/:id/pagar
 async function crearPagoGastoAPI(payload) {
   try {
     const { gasto_id, ...body } = payload; // el body NO lleva gasto_id
     await api.post(`/gastos/${gasto_id}/pagar`, body);
-    return true;
+    return { ok: true };
   } catch (e) {
     console.error("crearPagoGastoAPI /gastos/:id/pagar falló:", e?.response?.status, e?.response?.data);
-    return false;
+    return { ok: false, err: e?.response?.data?.detail || "No pude registrar el pago." };
   }
 }
 
@@ -144,7 +143,7 @@ export default function Gastos() {
     return tarjetaNombreMap[String(id)] || `Tarjeta ${id}`;
   }
 
-  // ------- Menú contextual (como en Tarjetas) -------
+  // ------- Menú contextual -------
   const [menu, setMenu] = useState({ show:false, x:0, y:0, target:null });
   const menuRef = useRef(null);
 
@@ -224,7 +223,6 @@ export default function Gastos() {
         });
       }
     } catch (e) {
-      // sin detalle => queda vacío
       console.warn("GET detalle gasto falló:", e?.response?.data || e);
     }
   };
@@ -384,7 +382,7 @@ export default function Gastos() {
         monto: Number(edit.monto || 0),
         mes: edit.mes ? Number(edit.mes) : null,
         anio: edit.anio ? Number(edit.anio) : null,
-        pagado: Boolean(edit.pagado),
+        pagado: Boolean(edit.pagado), // el backend lo bloqueará si se intenta tocar 'pagado'
         es_recurrente: Boolean(edit.es_recurrente),            // ← DB
         con_tarjeta: edit.fp_ui === FP.CREDITO,                // ← DB
         tarjeta_id: edit.fp_ui === FP.CREDITO ? Number(edit.tarjeta_id) : null, // ← DB
@@ -392,12 +390,24 @@ export default function Gastos() {
       await loadGastos();
       success("Cambios guardados");
     } catch (e) {
-      error({ title: "No pude guardar cambios", description: e?.response?.data?.detail || String(e) });
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 409) {
+        error({ title: "Operación no permitida", description: detail || "Conflicto con el estado actual." });
+      } else {
+        error({ title: "No pude guardar cambios", description: detail || String(e) });
+      }
     }
   }
 
   async function eliminarSeleccionado() {
     if (!sel) return;
+
+    if (sel.pagado) {
+      // coherencia UI con la regla backend
+      error({ title: "No se puede eliminar", description: "Para eliminar, primero deshaz el pago (si el período no está cerrado)." });
+      return;
+    }
+
     const ok = await confirm({
       title: "¿Eliminar gasto?",
       message: "Esta acción no se puede deshacer.",
@@ -412,7 +422,8 @@ export default function Gastos() {
       await loadGastos();
       success("Gasto eliminado");
     } catch (e) {
-      error({ title: "No pude eliminar", description: e?.response?.data?.detail || String(e) });
+      const detail = e?.response?.data?.detail;
+      error({ title: "No pude eliminar", description: detail || String(e) });
     }
   }
 
@@ -441,30 +452,34 @@ export default function Gastos() {
           tarjeta_id: tarjetaId // null salvo crédito
         };
 
-        const ok = await crearPagoGastoAPI(payloadPay);
-        if (!ok) {
-          error("No pude registrar el pago. Revisa que esté activo POST /gastos/:id/pagar.");
+        const res = await crearPagoGastoAPI(payloadPay);
+        if (!res.ok) {
+          error({ title: "No pude registrar el pago", description: res.err });
           return;
         }
         success("Pago registrado");
       } else {
-        // Deshacer pagado
-        await api.put(`/gastos/${sel.id}`, {
-          nombre: sel.nombre,
-          monto: Number(sel.monto || 0),
-          mes: sel.mes,
-          anio: sel.anio,
-          pagado: false,
-          es_recurrente: Boolean(sel.es_recurrente ?? sel.recurrente),
-          con_tarjeta: isCredito(sel),
-          tarjeta_id: isCredito(sel) ? Number(sel.tarjeta_id) : null,
+        // Confirmación y llamada al endpoint de deshacer
+        const ok = await confirm({
+          title: "Deshacer pago",
+          message: "Se eliminará el último registro de pago y el gasto quedará como NO pagado si no hay pagos restantes.",
+          confirmText: "Deshacer",
+          tone: "warning",
         });
+        if (!ok) return;
+
+        await api.post(`/gastos/${sel.id}/deshacer`);
         success("Se deshizo el pago");
       }
 
       await loadGastos();
     } catch (e) {
-      error({ title: "No pude actualizar el estado de pago", description: e?.response?.data?.detail || String(e) });
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 409) {
+        error({ title: "Operación no permitida", description: detail || "Conflicto con el estado actual." });
+      } else {
+        error({ title: "No pude actualizar el estado de pago", description: detail || String(e) });
+      }
     }
   }
 
@@ -788,6 +803,7 @@ export default function Gastos() {
                 onChange={(e) => setEdit({ ...edit, tarjeta_id: e.target.value })}
                 style={{ ...styles.input, opacity: edit.fp_ui === FP.CREDITO ? 1 : 0.5 }}
                 disabled={edit.fp_ui !== FP.CREDITO}
+                title={sel?.pagado ? "Si ya fue pagado en un período cerrado, el backend bloqueará cambios." : ""}
               >
                 <option value="">Selecciona…</option>
                 {tarjetas.map((t) => (
@@ -799,7 +815,15 @@ export default function Gastos() {
             </Field>
 
             <button onClick={guardarEdicion} style={ui.btn}>Guardar cambios</button>
-            <button onClick={eliminarSeleccionado} style={{ ...ui.btn, background: "#ff3b30" }}>Eliminar</button>
+
+            <button
+              onClick={eliminarSeleccionado}
+              style={{ ...ui.btn, background: sel?.pagado ? "#8a8f98" : "#ff3b30", cursor: sel?.pagado ? "not-allowed" : "pointer" }}
+              disabled={!!sel?.pagado}
+              title={sel?.pagado ? "Para eliminar, primero deshaz el pago (si el período no está cerrado)." : ""}
+            >
+              Eliminar
+            </button>
           </div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
@@ -947,3 +971,5 @@ const styles = {
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
   modal:{ width:"min(1100px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
+
+

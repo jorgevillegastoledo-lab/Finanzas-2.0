@@ -5,17 +5,21 @@ import api from "../api/api";
 import { useToast, useConfirm } from "../ui/notifications";
 import Button from "../ui/Button";
 
-const MESES = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+const MESES = [
+  "",
+  "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+  "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
+];
 const hoy = new Date();
 const MES_ACTUAL = hoy.getMonth() + 1;
 const ANIO_ACTUAL = hoy.getFullYear();
 
 const fmtCLP = (n) =>
-  new Intl.NumberFormat("es-CL", { style:"currency", currency:"CLP", maximumFractionDigits:0 }).format(Number(n || 0));
+  new Intl.NumberFormat("es-CL", { style:"currency", currency:"CLP", maximumFractionDigits:0 })
+    .format(Number(n || 0));
 
 const fmtError = (e) => e?.response?.data?.detail || e?.message || String(e);
 
-// Etiqueta
 const L = ({ label, children }) => (
   <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
     <span style={{ fontSize:12, color:"#9db7d3", opacity:.9, padding:"0 2px" }}>{label}</span>
@@ -27,30 +31,31 @@ export default function FacturacionTarjetas() {
   const { success, error, warning } = useToast();
   const confirm = useConfirm();
 
-  // base
   const [tarjetas, setTarjetas] = useState([]);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // vista
   const [vMes, setVMes] = useState(MES_ACTUAL);
   const [vAnio, setVAnio] = useState(ANIO_ACTUAL);
   const [fTarjeta, setFTarjeta] = useState("");
 
-  // crear
-  const emptyNuevo = { tarjeta_id:"", mes:String(MES_ACTUAL), anio:String(ANIO_ACTUAL), fecha_emision:"", fecha_vencimiento:"", total_pagar:"", pago_minimo:"", nro_estado:"" };
+  const emptyNuevo = {
+    tarjeta_id:"", mes:String(MES_ACTUAL), anio:String(ANIO_ACTUAL),
+    fecha_emision:"", fecha_vencimiento:"", total_pagar:"", pago_minimo:"", nro_estado:""
+  };
   const [nuevo, setNuevo] = useState(emptyNuevo);
   const [savingNew, setSavingNew] = useState(false);
 
-  // selección/edición
   const [sel, setSel] = useState(null);
-  const [edit, setEdit] = useState({ tarjeta_id:"", mes:"", anio:"", total_pagar:"", pagado:false, fecha_pago:"", monto_pagado:"" });
+  const [edit, setEdit] = useState({
+    tarjeta_id:"", mes:"", anio:"", total_pagar:"", pagada:false, fecha_pago:"", monto_pagado:""
+  });
   const editRef = useRef(null);
 
-  // menú contextual
   const [menu, setMenu] = useState({ show:false, x:0, y:0, target:null, openedAt:0 });
   const menuRef = useRef(null);
+
   useEffect(() => {
     const onDown = (e) => e.key === "Escape" && setMenu(m => ({ ...m, show:false }));
     const onClick = (e) => {
@@ -63,12 +68,22 @@ export default function FacturacionTarjetas() {
     };
     window.addEventListener("keydown", onDown);
     window.addEventListener("click", onClick);
-    return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("click", onClick); };
+    return () => {
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("click", onClick);
+    };
   }, []);
-  const openMenu = (e, row) => { e.preventDefault?.(); e.stopPropagation?.(); setMenu({ show:true, x:e.clientX, y:e.clientY, target:row, openedAt:Date.now() }); };
-  const openEditor = (row) => { const r = row || menu.target; if (!r) return; setMenu(m=>({ ...m, show:false })); setSel(r); setTimeout(()=>editRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }),0); };
 
-  // detalles (modal)
+  const openMenu = (e, row) => {
+    e.preventDefault?.(); e.stopPropagation?.();
+    setMenu({ show:true, x:e.clientX, y:e.clientY, target:row, openedAt:Date.now() });
+  };
+  const openEditor = (row) => {
+    const r = row || menu.target; if (!r) return;
+    setMenu(m=>({ ...m, show:false })); setSel(r);
+    setTimeout(()=>editRef.current?.scrollIntoView({ behavior:"smooth", block:"start" }),0);
+  };
+
   const [detOpen, setDetOpen] = useState(false);
   const [detBusy, setDetBusy] = useState(false);
   const [det, setDet] = useState({
@@ -76,9 +91,9 @@ export default function FacturacionTarjetas() {
   });
 
   const tarjetaLabel = (obj) =>
-    (obj.banco ? `${obj.banco} — ` : "") + (obj.tarjeta || obj.nombre || `Tarjeta ${obj.tarjeta_id ?? obj.id ?? ""}`);
+    (obj.banco ? `${obj.banco} — ` : "") +
+    (obj.tarjeta || obj.nombre || `Tarjeta ${obj.tarjeta_id ?? obj.id ?? ""}`);
 
-  // cargas
   useEffect(() => { loadTarjetas(); }, []);
   useEffect(() => { loadEstados(); /* eslint-disable-next-line */ }, [vMes, vAnio, fTarjeta]);
 
@@ -88,10 +103,13 @@ export default function FacturacionTarjetas() {
       setTarjetas(Array.isArray(data) ? data : (data?.data ?? []));
     } catch {}
   }
+
   async function loadEstados() {
     try {
       setErr(""); setLoading(true);
-      const { data } = await api.get("/facturas", { params:{ mes:Number(vMes), anio:Number(vAnio), tarjeta_id: fTarjeta || undefined }});
+      const { data } = await api.get("/facturas", {
+        params:{ mes:Number(vMes), anio:Number(vAnio), tarjeta_id: fTarjeta || undefined }
+      });
       const arr = Array.isArray(data) ? data : (data?.data ?? []);
       setItems(arr);
       if (sel) setSel(arr.find(x=>x.id === sel.id) || null);
@@ -101,17 +119,17 @@ export default function FacturacionTarjetas() {
     } finally { setLoading(false); }
   }
 
-  // totales
   const totales = useMemo(() => {
     const total = items.reduce((a,i)=>a + Number(i.total ?? i.total_pagar ?? 0), 0);
     const pagado = items.reduce((a,i)=>a + (i.pagada ? Number(i.total ?? 0) : 0), 0);
     return { total, pagado, pend: total - pagado };
   }, [items]);
 
-  // crear
   async function crearEstado(e) {
     e?.preventDefault?.();
-    if (!nuevo.tarjeta_id || !nuevo.total_pagar) { warning("Tarjeta y Total a pagar son obligatorios."); return; }
+    if (!nuevo.tarjeta_id || !nuevo.total_pagar) {
+      warning("Tarjeta y Total a pagar son obligatorios."); return;
+    }
     try {
       setSavingNew(true);
       await api.post("/facturas", {
@@ -128,7 +146,6 @@ export default function FacturacionTarjetas() {
     } finally { setSavingNew(false); }
   }
 
-  // selección → editor
   useEffect(() => {
     if (!sel) return;
     setEdit({
@@ -136,9 +153,9 @@ export default function FacturacionTarjetas() {
       mes: String(sel.mes ?? ""),
       anio: String(sel.anio ?? ""),
       total_pagar: String(sel.total ?? sel.total_pagar ?? ""),
-      pagado: !!sel.pagada,
+      pagada: !!sel.pagada,
       fecha_pago: sel.fecha_pago || "",
-      monto_pagado: ""  // opcional si quieres usarlo para sugerencia
+      monto_pagado: ""
     });
   }, [sel]);
 
@@ -151,7 +168,8 @@ export default function FacturacionTarjetas() {
         anio: edit.anio ? Number(edit.anio) : null,
         total: edit.total_pagar !== "" ? Number(edit.total_pagar) : null,
       });
-      await loadEstados(); success("Cambios guardados");
+      await loadEstados();
+      success("Cambios guardados");
     } catch (e) {
       error({ title:"No pude guardar cambios", description:fmtError(e) });
     }
@@ -159,38 +177,73 @@ export default function FacturacionTarjetas() {
 
   async function eliminarEstado() {
     if (!sel) return;
-    const ok = await confirm({ title:"¿Eliminar estado?", message:"Esta acción no se puede deshacer.", confirmText:"Eliminar", tone:"danger" });
+    const ok = await confirm({
+      title:"¿Eliminar estado?",
+      message:"Esta acción no se puede deshacer.",
+      confirmText:"Eliminar",
+      tone:"danger"
+    });
     if (!ok) return;
     try {
       await api.delete(`/facturas/${sel.id}`);
-      setSel(null); await loadEstados();
+      setSel(null);
+      await loadEstados();
       success("Estado eliminado");
     } catch (e) {
       error({ title:"No pude eliminar", description:fmtError(e) });
     }
   }
 
+  // Pago/deshacer con confirm e idempotencia
   async function marcarPagado() {
     if (!sel) return;
+    if (sel.pagada) return;
+
+    // Evitar mezclar ?? y || sin paréntesis.
+    const totalAConfirmar = Number((sel.total ?? sel.total_pagar) ?? 0);
+
+    const ok = await confirm({
+      title: "Confirmar pago",
+      message: `¿Marcar la factura como pagada por ${fmtCLP(totalAConfirmar)}?`,
+      confirmText: "Sí, pagar",
+    });
+    if (!ok) return;
+
     try {
-      await api.put(`/facturas/${sel.id}`, { pagada:true, fecha_pago: edit.fecha_pago || new Date().toISOString().slice(0,10) });
-      await loadEstados(); success("Pago registrado");
+      // Enviar fecha sólo si el usuario la eligió; si no, backend usará hoy.
+      const fecha = edit.fecha_pago ? edit.fecha_pago : undefined;
+      await api.post(`/facturas/${sel.id}/pagar`, { fecha_pago: fecha });
+      await loadEstados();
+      success("Pago registrado");
     } catch (e) {
-      error({ title:"No pude registrar el pago", description:fmtError(e) });
+      if (e?.response?.status === 409) {
+        warning(e?.response?.data?.detail ?? "La factura ya está pagada.");
+        await loadEstados();
+        return;
+      }
+      error({ title: "No pude registrar el pago", description: fmtError(e) });
     }
   }
 
   async function deshacerPago() {
     if (!sel) return;
+    const ok = await confirm({
+      title: "Deshacer pago",
+      message: "¿Quitar el estado de pago de esta factura?",
+      confirmText: "Sí, deshacer",
+      tone: "danger"
+    });
+    if (!ok) return;
+
     try {
-      await api.put(`/facturas/${sel.id}`, { pagada:false, fecha_pago:null });
-      await loadEstados(); success("Pago deshecho");
+      await api.post(`/facturas/${sel.id}/deshacer`);
+      await loadEstados();
+      success("Se deshizo el pago");
     } catch (e) {
       error({ title:"No pude deshacer el pago", description:fmtError(e) });
     }
   }
 
-  // ---- Detalles 1:1
   function abrirDetallesDesde(rowSel) {
     const r = rowSel || sel || menu.target;
     if (!r) { warning("Primero selecciona un estado."); return; }
@@ -205,8 +258,8 @@ export default function FacturacionTarjetas() {
       setDet({
         fecha_emision: detData.fecha_emision || "",
         fecha_vencimiento: detData.fecha_vencimiento || "",
-        pago_minimo: detData.pago_minimo !== null && detData.pago_minimo !== undefined ? String(detData.pago_minimo) : "",
-        monto_pagado: detData.monto_pagado !== null && detData.monto_pagado !== undefined ? String(detData.monto_pagado) : "",
+        pago_minimo: detData.pago_minimo ?? "",
+        monto_pagado: detData.monto_pagado ?? "",
         nro_estado: detData.nro_estado || "",
         nota: detData.nota || "",
       });
@@ -217,9 +270,7 @@ export default function FacturacionTarjetas() {
   }
 
   async function guardarDetalles() {
-    if (!sel && !menu.target) return;
-    const id = sel?.id ?? menu.target?.id;
-    if (!id) return;
+    const id = sel?.id ?? menu.target?.id; if (!id) return;
     try {
       setDetBusy(true);
       await api.put(`/facturas/${id}/detalle`, {
@@ -240,25 +291,23 @@ export default function FacturacionTarjetas() {
   return (
     <AppShell title="Facturación tarjetas" actions={<button style={ui.btn} onClick={loadEstados}>Actualizar</button>}>
 
-      {/* Vista */}
+      {/* Vista contable */}
       <div style={ui.card}>
         <div style={{ fontWeight:700, marginBottom:12 }}>📅 Vista contable</div>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 2fr", gap:10, alignItems:"end" }}>
           <div style={{ display:"flex", gap:10, alignItems:"end" }}>
             <L label="Mes">
               <select value={vMes} onChange={e=>setVMes(Number(e.target.value))} style={styles.input}>
-                {Array.from({length:12},(_,i)=>i+1).map(m=>(<option key={m} value={m}>{MESES[m]}</option>))}
+                {Array.from({length:12},(_,i)=>i+1).map(m => (<option key={m} value={m}>{MESES[m]}</option>))}
               </select>
             </L>
             <L label="Año">
               <input type="number" value={vAnio} onChange={e=>setVAnio(Number(e.target.value))} style={styles.input}/>
             </L>
           </div>
-
           <div style={{ opacity:.9, alignSelf:"center" }}>
             Totales: pagado {fmtCLP(totales.pagado)} / total {fmtCLP(totales.total)} · pendiente <b>{fmtCLP(totales.pend)}</b>
           </div>
-
           <div style={{ justifySelf:"end", width:"100%", maxWidth:380 }}>
             <L label="Tarjeta (filtro)">
               <select value={fTarjeta} onChange={(e)=>setFTarjeta(e.target.value)} style={styles.input}>
@@ -401,20 +450,39 @@ export default function FacturacionTarjetas() {
             <L label="Total a pagar"><input type="number" value={edit.total_pagar} onChange={e=>setEdit({ ...edit, total_pagar:e.target.value })} style={styles.input}/></L>
 
             <Button onClick={guardar} size="md">Guardar cambios</Button>
-            <Button variant="danger" onClick={eliminarEstado} size="md">Eliminar</Button>
+            <Button
+              variant="danger"
+              onClick={eliminarEstado}
+              size="md"
+              disabled={!!sel?.pagada}
+              title={sel?.pagada ? "No puedes eliminar una factura ya pagada" : ""}
+            >
+              Eliminar
+            </Button>
           </div>
 
-          {/* Pago */}
           <div style={{ marginTop:16 }}>
             <div style={{ fontWeight:700, marginBottom:8 }}>💳 Pago del estado</div>
             <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, alignItems:"end", marginBottom:10 }}>
               <L label="Fecha pago"><input type="date" value={edit.fecha_pago} onChange={e=>setEdit({ ...edit, fecha_pago:e.target.value })} style={styles.input}/></L>
             </div>
             <div style={{ display:"flex", gap:10 }}>
-              <button type="button" onClick={marcarPagado} style={{ ...ui.btn, background:"#1e90ff" }}>
-                Marcar estado pagado
+              <button
+                type="button"
+                onClick={marcarPagado}
+                style={{ ...ui.btn, background: sel?.pagada ? "#2d6a4f" : "#1e90ff", opacity: sel?.pagada ? .85 : 1 }}
+                disabled={!!sel?.pagada}
+                title={sel?.pagada ? "Ya pagada" : ""}
+              >
+                {sel?.pagada ? "Ya pagada" : "Marcar estado pagado"}
               </button>
-              <button type="button" onClick={deshacerPago} style={{ ...ui.btn, background:"#6c757d", opacity: sel?.pagada ? 1 : .7 }} disabled={!sel?.pagada}>
+              <button
+                type="button"
+                onClick={deshacerPago}
+                style={{ ...ui.btn, background:"#6c757d", opacity: sel?.pagada ? 1 : .7 }}
+                disabled={!sel?.pagada}
+                title={!sel?.pagada ? "No hay pago para deshacer" : ""}
+              >
                 Deshacer pago
               </button>
               <button type="button" onClick={()=>abrirDetallesDesde(sel)} style={{ ...ui.btn, background:"#0ec3cc" }}>📄 Detalles</button>
@@ -452,14 +520,9 @@ const styles = {
   th:{ textAlign:"left", padding:"10px 8px", borderBottom:"1px solid #1f2a44", whiteSpace:"nowrap" },
   td:{ padding:"8px", borderBottom:"1px solid #1f2a44", whiteSpace:"nowrap" },
   tr:{ transition:"background .15s ease" },
-  smallBtn:{ padding:"6px 10px", border:0, borderRadius:8, background:"#ffd166", color:"#162", fontWeight:700, cursor:"pointer" },
   error:{ background:"#ff3b30", color:"#fff", padding:"6px 10px", borderRadius:8 },
   menuItem:{ display:"block", width:"100%", textAlign:"left", padding:"10px 12px", background:"transparent", color:"#e6f0ff", border:0, cursor:"pointer" },
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
   modal:{ width:"min(860px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
-
-
-
-
 

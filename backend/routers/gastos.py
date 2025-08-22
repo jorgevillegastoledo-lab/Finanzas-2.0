@@ -1,7 +1,8 @@
 # routers/gastos.py
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
+from calendar import monthrange
 
 import psycopg2.extras
 from psycopg2 import sql
@@ -14,6 +15,32 @@ from core.dbutils import (
 )
 
 router = APIRouter(prefix="/gastos", tags=["Gastos"])
+
+# ---------------- Helpers de período/cierre ----------------
+_CIERRE_OFFSET_DIAS = 5  # fijo, por ahora
+
+def _is_period_closed(mes: int, anio: int, offset_dias: int = _CIERRE_OFFSET_DIAS) -> bool:
+    """
+    Determina si el período (mes/anio) está cerrado.
+    Regla: hoy > fin_de_mes + offset_dias  => cerrado
+    """
+    try:
+        if not (1 <= int(mes) <= 12) or not (2000 <= int(anio) <= 2100):
+            return False
+        last_day = date(int(anio), int(mes), monthrange(int(anio), int(mes))[1])
+        hoy = date.today()
+        return hoy > (last_day + timedelta(days=offset_dias))
+    except Exception:
+        return False
+
+def _raise_if_deshacer_cerrado(mes: int, anio: int):
+    """Cierre sólo aplica a DESHACER (y a editar/eliminar cuando ya está pagado)."""
+    if _is_period_closed(mes, anio):
+        m = f"El período {str(mes).zfill(2)}/{anio} está cerrado. No se puede deshacer el pago."
+        raise HTTPException(status_code=409, detail=m)
+
+def _msg_cierre(mes: int, anio: int) -> str:
+    return f"El período {str(mes).zfill(2)}/{anio} está cerrado. No se permiten cambios en gastos pagados."
 
 # ---------- Schemas ----------
 class GastoIn(BaseModel):
@@ -118,10 +145,32 @@ def crear_gasto(body: GastoIn):
 def editar_gasto(id: int, body: GastoUpdate):
     try:
         conn = get_conn()
+        # Traer gasto actual
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, mes, anio, pagado FROM gastos WHERE id = %s;", (id,))
+            current = cur.fetchone()
+        if not current:
+            conn.close()
+            raise HTTPException(404, "Gasto no encontrado")
+
+        # 1) No permitir tocar 'pagado' desde PUT
+        incoming = body.dict(exclude_unset=True)
+        if "pagado" in incoming:
+            conn.close()
+            raise HTTPException(409, "No puedes cambiar el estado 'pagado' por esta ruta. Usa /gastos/{id}/pagar o /gastos/{id}/deshacer.")
+
+        # 2) Si el gasto ya está pagado y el período cerrado => bloquear edición
+        if bool(current.get("pagado")) and _is_period_closed(int(current["mes"]), int(current["anio"])):
+            conn.close()
+            raise HTTPException(409, _msg_cierre(int(current["mes"]), int(current["anio"])))
+
+        # 3) Ejecutar UPDATE (cualquier campo válido excepto 'pagado')
         cols_exist = get_columns(conn, "gastos")
-        data = {k: v for k, v in body.dict(exclude_unset=True).items() if k in cols_exist}
+        data = {k: v for k, v in incoming.items() if k in cols_exist}
         if not data:
+            conn.close()
             raise HTTPException(400, "No hay columnas válidas que actualizar.")
+
         sets = [sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder()) for k in data.keys()]
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             q = sql.SQL("UPDATE gastos SET {sets} WHERE id = %s RETURNING *;").format(
@@ -133,6 +182,8 @@ def editar_gasto(id: int, body: GastoUpdate):
         if not row:
             raise HTTPException(404, "Gasto no encontrado")
         return {"ok": True, "data": _fix_json([row])[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error al editar gasto: {e}")
 
@@ -140,10 +191,19 @@ def editar_gasto(id: int, body: GastoUpdate):
 def eliminar_gasto(id: int):
     try:
         conn = get_conn()
+        # Chequear estado pagado
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, pagado FROM gastos WHERE id = %s;", (id,))
+            g = cur.fetchone()
+        if not g:
+            conn.close()
+            raise HTTPException(404, "Gasto no encontrado")
+        if bool(g.get("pagado")):
+            conn.close()
+            raise HTTPException(409, "No se puede eliminar un gasto pagado. Deshaz el pago primero.")
+
         with conn.cursor() as cur:
             cur.execute("DELETE FROM gastos WHERE id = %s;", (id,))
-            if cur.rowcount == 0:
-                raise HTTPException(404, "Gasto no encontrado")
         conn.close()
         return {"ok": True}
     except HTTPException:
@@ -166,20 +226,19 @@ def pagar_gasto(id: int, body: GastoPagarIn):
             )
             gasto = cur.fetchone()
         if not gasto:
+            conn.close()
             raise HTTPException(404, "Gasto no encontrado")
 
+        # IMPORTANTE: pagar SI está permitido aun si el período está cerrado
+
         # si ya está marcado pagado, no permitir otro registro
-        pagado_val = gasto.get("pagado", False)
-        try:
-            ya_pagado = bool(pagado_val) if isinstance(pagado_val, bool) else int(pagado_val) == 1
-        except Exception:
-            ya_pagado = bool(pagado_val)
-        if ya_pagado:
+        if bool(gasto.get("pagado", False)):
+            conn.close()
             raise HTTPException(409, "El gasto ya está marcado como pagado")
 
         fecha = body.fecha or date.today()
         monto = body.monto if body.monto is not None else float(gasto["monto"] or 0)
-        metodo = body.metodo or ("Crédito" if gasto.get("con_tarjeta") else "Efectivo/Débito")
+        metodo = (body.metodo or ("credito" if gasto.get("con_tarjeta") else "efectivo")).lower()
         tarjeta_id = body.tarjeta_id if body.tarjeta_id is not None else gasto.get("tarjeta_id")
         nota = body.nota
 
@@ -200,16 +259,28 @@ def pagar_gasto(id: int, body: GastoPagarIn):
     except Exception as e:
         raise HTTPException(500, f"Error al pagar gasto: {e}")
 
-# ----- NUEVO: deshacer último pago -----
+# ----- Deshacer último pago -----
 @router.post("/{id}/deshacer")
 def deshacer_pago_gasto(id: int):
     """
     Elimina el **último** pago registrado del gasto (orden por fecha, created_at, id DESC).
     Si ya no quedan pagos, deja `pagado = FALSE` en la tabla `gastos`.
+    Regla: NO se puede deshacer si el período está cerrado.
     """
     try:
         conn = get_conn()
         ensure_pagos_gasto_table(conn)
+
+        # Traer mes/anio del gasto para validar cierre
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, mes, anio FROM gastos WHERE id = %s;", (id,))
+            g = cur.fetchone()
+        if not g:
+            conn.close()
+            raise HTTPException(404, "Gasto no encontrado")
+
+        _raise_if_deshacer_cerrado(int(g["mes"]), int(g["anio"]))
+
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # localizar último pago
             cur.execute(
@@ -224,17 +295,19 @@ def deshacer_pago_gasto(id: int):
             )
             last = cur.fetchone()
             if not last:
-                raise HTTPException(400, "No hay pagos para deshacer.")
+                conn.close()
+                raise HTTPException(status_code=409, detail="No hay pagos para deshacer.")
 
             # borrar último pago
             cur.execute("DELETE FROM pagos_gasto WHERE id = %s;", (last["id"],))
 
             # ¿quedan pagos?
-            cur.execute("SELECT COUNT(*) FROM pagos_gasto WHERE gasto_id = %s;", (id,))
-            cnt = cur.fetchone()[0] if isinstance(cur.fetchone, list) else cur.fetchone
+            cur.execute("SELECT COUNT(*) AS cnt FROM pagos_gasto WHERE gasto_id = %s;", (id,))
+            cnt_row = cur.fetchone()
+            restantes = int(cnt_row["cnt"]) if isinstance(cnt_row, dict) else int(cnt_row[0])
 
             # setear flag pagado según correspondan pagos restantes
-            cur.execute("UPDATE gastos SET pagado = %s WHERE id = %s;", (bool(cnt), id))
+            cur.execute("UPDATE gastos SET pagado = %s WHERE id = %s;", (restantes > 0, id))
         conn.close()
         return {"ok": True}
     except HTTPException:
@@ -242,7 +315,7 @@ def deshacer_pago_gasto(id: int):
     except Exception as e:
         raise HTTPException(500, f"Error al deshacer pago: {e}")
 
-# ----- NUEVO: listar pagos del gasto -----
+# ----- Listar pagos del gasto -----
 @router.get("/{id}/pagos")
 def listar_pagos_gasto(id: int):
     try:

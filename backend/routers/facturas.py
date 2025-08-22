@@ -139,18 +139,26 @@ def eliminar_factura(id: int):
     except Exception as e:
         raise HTTPException(500, f"Error al eliminar factura: {e}")
 
-# --------- Pagar / Deshacer ---------
+# --------- Pagar / Deshacer (idempotentes) ---------
 @router.post("/{id}/pagar")
 def marcar_pagada(id: int, body: FacturaPagoIn):
-    """Marca la factura como pagada y guarda monto/fecha en el detalle."""
+    """Marca la factura como pagada (si ya lo está -> 409)."""
     try:
         conn = get_conn()
         ensure_facturas_table(conn)
         ensure_factura_detalle_table(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT pagada FROM facturas WHERE id=%s;", (id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Factura no encontrada")
+            if row["pagada"]:
+                raise HTTPException(409, "La factura ya está pagada.")
+
         pago_fecha = body.fecha_pago or date.today()
         with conn.cursor() as cur:
             cur.execute("UPDATE facturas SET pagada=TRUE, fecha_pago=%s WHERE id=%s;", (pago_fecha, id))
-            # upsert detalle con monto_pagado y fecha_vencimiento/emision si llegaran después
             cur.execute("""
                 INSERT INTO factura_detalle (factura_id, monto_pagado, updated_at)
                 VALUES (%s, %s, NOW())
@@ -160,29 +168,38 @@ def marcar_pagada(id: int, body: FacturaPagoIn):
             """, (id, body.monto_pagado))
         conn.close()
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error al registrar pago: {e}")
 
 @router.post("/{id}/deshacer")
 def deshacer_pago(id: int):
-    """Desmarca como pagada y limpia monto_pagado en detalle."""
+    """Quita el pago si hoy está pagada (si no -> 409)."""
     try:
         conn = get_conn()
         ensure_facturas_table(conn)
         ensure_factura_detalle_table(conn)
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT pagada FROM facturas WHERE id=%s;", (id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Factura no encontrada")
+            if not row["pagada"]:
+                raise HTTPException(409, "La factura no está pagada.")
+
         with conn.cursor() as cur:
             cur.execute("UPDATE facturas SET pagada=FALSE, fecha_pago=NULL WHERE id=%s;", (id,))
-            cur.execute("""
-                UPDATE factura_detalle
-                SET monto_pagado = NULL, updated_at = NOW()
-                WHERE factura_id=%s;
-            """, (id,))
+            cur.execute("UPDATE factura_detalle SET monto_pagado=NULL, updated_at=NOW() WHERE factura_id=%s;", (id,))
         conn.close()
         return {"ok": True}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error al deshacer pago: {e}")
 
-# --------- Detalle (1:1 con facturas) ---------
+# --------- Detalle ---------
 @router.get("/{id}/detalle")
 def get_factura_detalle(id: int):
     try:
@@ -202,7 +219,6 @@ def upsert_factura_detalle(id: int, body: FacturaDetalleIn):
         conn = get_conn()
         ensure_factura_detalle_table(conn)
         data: Dict[str, Any] = {k: v for k, v in body.dict(exclude_unset=True).items()}
-        # limpiar strings vacíos
         for k in list(data.keys()):
             if isinstance(data[k], str) and data[k].strip() == "":
                 data[k] = None
@@ -236,9 +252,10 @@ def delete_factura_detalle(id: int):
         conn = get_conn()
         ensure_factura_detalle_table(conn)
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM factura_detalle WHERE factura_id=%s;", (id,))
+          cur.execute("DELETE FROM factura_detalle WHERE factura_id=%s;", (id,))
         conn.close()
         return {"ok": True}
     except Exception as e:
         raise HTTPException(500, f"Error al eliminar detalle: {e}")
+
 

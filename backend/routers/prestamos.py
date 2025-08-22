@@ -1,21 +1,57 @@
 # routers/prestamos.py
 from __future__ import annotations
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 from psycopg2.errors import UniqueViolation
 
 import psycopg2.extras
 from psycopg2 import sql
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from core.dbutils import (
     get_conn, _fix_json, get_columns, get_column_type, NUMERIC_TYPES,
     ensure_pagos_prestamo_table, ensure_prestamo_detalle_support,
     recompute_prestamo_totales
 )
-from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/prestamos", tags=["Préstamos"])
+
+# -------------------------- Parámetros de negocio --------------------------
+Cierre_OFFSET_DIAS = 5  # fin de mes + 5 días
+
+def _ultimo_dia_mes(anio: int, mes: int) -> date:
+    """Devuelve el último día del mes (1..12) del año dado."""
+    if mes == 12:
+        first_next = date(anio + 1, 1, 1)
+    else:
+        first_next = date(anio, mes + 1, 1)
+    return first_next - timedelta(days=1)
+
+def _periodo_cerrado(mes: int, anio: int, hoy: Optional[date] = None) -> bool:
+    """
+    Cierre contable: un período (mes/año) queda cerrado al finalizar
+    el último día del mes + Cierre_OFFSET_DIAS (inclusive).
+    """
+    hoy = hoy or date.today()
+    cierre = _ultimo_dia_mes(anio, mes) + timedelta(days=Cierre_OFFSET_DIAS)
+    return hoy > cierre
+
+def _ensure_prestamos_soft_delete(conn) -> None:
+    """Crea columnas de soft delete si no existen."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE prestamos
+            ADD COLUMN IF NOT EXISTS anulado BOOLEAN NOT NULL DEFAULT FALSE;
+        """)
+        cur.execute("""
+            ALTER TABLE prestamos
+            ADD COLUMN IF NOT EXISTS fecha_anulacion TIMESTAMP WITHOUT TIME ZONE NULL;
+        """)
+        cur.execute("""
+            ALTER TABLE prestamos
+            ADD COLUMN IF NOT EXISTS motivo_anulacion TEXT NULL;
+        """)
 
 # -------------------------- Schemas --------------------------
 class PrestamoIn(BaseModel):
@@ -62,13 +98,17 @@ class PrestamoDetalleIn(BaseModel):
     liquido_recibido: Optional[float] = None
     gastos_iniciales_total: Optional[float] = None
 
+class AnularPrestamoIn(BaseModel):
+    motivo: Optional[str] = None
+
 # -------------------------- Endpoints --------------------------
 @router.get("")
 def listar_prestamos():
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM prestamos ORDER BY id;")
+            cur.execute("SELECT * FROM prestamos WHERE COALESCE(anulado, FALSE) = FALSE ORDER BY id;")
             rows = cur.fetchall()
         conn.close()
         return {"ok": True, "data": _fix_json(rows)}
@@ -79,6 +119,7 @@ def listar_prestamos():
 def crear_prestamo(body: PrestamoIn):
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         cols = get_columns(conn, "prestamos")
         data = {
             "nombre": body.nombre,
@@ -124,21 +165,33 @@ def crear_prestamo(body: PrestamoIn):
 def editar_prestamo(id: int, body: PrestamoIn):
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
+        # Bloqueo de cambios sensibles si ya hay pagos:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM pagos_prestamo WHERE prestamo_id=%s;", (id,))
+            pagos = cur.fetchone()[0]
         cols = get_columns(conn, "prestamos")
-        data = {k: v for k, v in body.dict().items() if k in cols}
-        if not data:
+        incoming = {k: v for k, v in body.dict().items() if k in cols}
+        if not incoming:
             raise HTTPException(400, "No hay columnas válidas que actualizar.")
-        sets = [sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder()) for k in data.keys()]
+        if pagos > 0:
+            for k in ("valor_cuota", "cuotas_totales", "primer_mes", "primer_anio"):
+                if k in incoming and incoming[k] is not None:
+                    raise HTTPException(409, "No puedes editar valor de cuota, cuotas totales ni fecha inicial en un préstamo con pagos.")
+        sets = [sql.SQL("{} = {}").format(sql.Identifier(k), sql.Placeholder()) for k in incoming.keys()]
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             q = sql.SQL("UPDATE prestamos SET {sets} WHERE id = %s RETURNING *;").format(
                 sets=sql.SQL(", ").join(sets)
             )
-            cur.execute(q, list(data.values()) + [id])
+            cur.execute(q, list(incoming.values()) + [id])
             row = cur.fetchone()
         recompute_prestamo_totales(conn, id)
         conn.close()
-        if not row: raise HTTPException(404, "Préstamo no encontrado")
+        if not row: 
+            raise HTTPException(404, "Préstamo no encontrado")
         return {"ok": True, "data": _fix_json([row])[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error al editar préstamo: {e}")
         
@@ -146,13 +199,16 @@ def editar_prestamo(id: int, body: PrestamoIn):
 def marcar_pago_prestamo(id: int, body: PagoPrestamoIn):
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         ensure_pagos_prestamo_table(conn)
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT valor_cuota FROM prestamos WHERE id = %s;", (id,))
+            cur.execute("SELECT valor_cuota, COALESCE(anulado,FALSE) AS anulado FROM prestamos WHERE id = %s;", (id,))
             row = cur.fetchone()
             if not row:
                 raise HTTPException(404, "Préstamo no encontrado")
+            if row["anulado"]:
+                raise HTTPException(409, "No puedes registrar pagos en un préstamo anulado.")
             default_cuota = float(row["valor_cuota"] or 0)
 
         monto = body.monto_pagado if body.monto_pagado is not None else default_cuota
@@ -164,7 +220,6 @@ def marcar_pago_prestamo(id: int, body: PagoPrestamoIn):
                     VALUES (%s, %s, %s, %s);
                 """, (id, body.mes_contable, body.anio_contable, monto))
         except UniqueViolation:
-            # Ya hay un pago para ese periodo
             raise HTTPException(status_code=409, detail="Ya existe un pago para ese mes/año.")
 
         recompute_prestamo_totales(conn, id)
@@ -183,26 +238,28 @@ def marcar_pago_prestamo_put(id: int, body: PagoPrestamoIn):
 def deshacer_pago_prestamo(id: int):
     """
     Elimina el **último** pago registrado del préstamo (orden por año, mes, id DESC).
+    Respeta el cierre contable (fin de mes + 5 días) del período del último pago.
     """
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         ensure_pagos_prestamo_table(conn)
-        with conn.cursor() as cur:
-            # ¿Existe pago?
-            cur.execute("SELECT id FROM pagos_prestamo WHERE prestamo_id=%s LIMIT 1;", (id,))
-            if not cur.fetchone():
-                raise HTTPException(400, "No hay pagos para deshacer.")
-            # Borrar el último
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                DELETE FROM pagos_prestamo
-                WHERE id IN (
-                    SELECT id
-                    FROM pagos_prestamo
-                    WHERE prestamo_id=%s
-                    ORDER BY anio_contable DESC, mes_contable DESC, id DESC
-                    LIMIT 1
-                );
+                SELECT id, mes_contable, anio_contable
+                FROM pagos_prestamo
+                WHERE prestamo_id=%s
+                ORDER BY anio_contable DESC, mes_contable DESC, id DESC
+                LIMIT 1;
             """, (id,))
+            last = cur.fetchone()
+            if not last:
+                raise HTTPException(400, "No hay pagos para deshacer.")
+            if _periodo_cerrado(int(last["mes_contable"]), int(last["anio_contable"])):
+                mes = int(last["mes_contable"]); anio = int(last["anio_contable"])
+                raise HTTPException(409, f"El período {mes:02d}/{anio} está cerrado (fin de mes + {Cierre_OFFSET_DIAS} días). No se puede deshacer.")
+
+            cur.execute("DELETE FROM pagos_prestamo WHERE id = %s;", (last["id"],))
         recompute_prestamo_totales(conn, id)
         conn.close()
         return {"ok": True}
@@ -219,6 +276,7 @@ def listar_pagos_prestamo(
 ):
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         ensure_pagos_prestamo_table(conn)
         where = ["prestamo_id = %s"]
         params: List[Any] = [id]
@@ -244,6 +302,7 @@ def listar_pagos_prestamo(
 def listar_prestamos_resumen():
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT
@@ -267,6 +326,7 @@ def listar_prestamos_resumen():
                     ORDER BY pp2.anio_contable DESC, pp2.mes_contable DESC, pp2.id DESC
                     LIMIT 1
                 ) up ON TRUE
+                WHERE COALESCE(p.anulado, FALSE) = FALSE
                 ORDER BY p.id;
             """)
             rows = cur.fetchall()
@@ -276,13 +336,25 @@ def listar_prestamos_resumen():
         raise HTTPException(500, f"Error al cargar resumen de préstamos: {e}")
 
 @router.delete("/{id}")
-def eliminar_prestamo(id: int):
+def eliminar_prestamo(id: int, motivo: Optional[str] = Query(None, description="Motivo (opcional)")):
+    """
+    Soft delete: permite anular SOLO si no existen pagos.
+    Si existen pagos -> 409 (sugerir 'cerrar anticipadamente').
+    """
     try:
         conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
         ensure_pagos_prestamo_table(conn)
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM pagos_prestamo WHERE prestamo_id = %s;", (id,))
-            cur.execute("DELETE FROM prestamos WHERE id = %s;", (id,))
+            cur.execute("SELECT COUNT(*) FROM pagos_prestamo WHERE prestamo_id = %s;", (id,))
+            pagos = cur.fetchone()[0]
+            if pagos and int(pagos) > 0:
+                raise HTTPException(409, "No se puede eliminar un préstamo con pagos. Usa 'Cerrar anticipadamente'.")
+            cur.execute("""
+                UPDATE prestamos
+                SET anulado = TRUE, fecha_anulacion = NOW(), motivo_anulacion = %s
+                WHERE id = %s;
+            """, (motivo, id))
             if cur.rowcount == 0:
                 raise HTTPException(404, "Préstamo no encontrado")
         conn.close()
@@ -290,7 +362,54 @@ def eliminar_prestamo(id: int):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Error al eliminar préstamo: {e}")
+        raise HTTPException(500, f"Error al anular préstamo: {e}")
+
+# --------- Alias explícito para anular (mejor semántica desde el front) ----------
+@router.post("/{id}/anular")
+def anular_prestamo(id: int, body: AnularPrestamoIn):
+    return eliminar_prestamo(id, motivo=body.motivo)
+
+# --------- Cerrar anticipadamente (si hay pagos) ----------
+@router.post("/{id}/cerrar-anticipado")
+def cerrar_anticipado(id: int):
+    """
+    Ajusta el préstamo a lo efectivamente pagado:
+      - cuotas_totales = cuotas_pagadas
+      - deuda_restante = 0 (si existe)
+      - pagado = TRUE (si columna es booleana)
+    No borra pagos.
+    """
+    try:
+        conn = get_conn()
+        _ensure_prestamos_soft_delete(conn)
+        ensure_pagos_prestamo_table(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(valor_cuota),0), COUNT(*)
+                FROM pagos_prestamo WHERE prestamo_id=%s;
+            """, (id,))
+            total_pagado, cuotas_pag = cur.fetchone()
+            if int(cuotas_pag) == 0:
+                raise HTTPException(409, "No hay pagos registrados. Para eliminar usa 'Anular préstamo'.")
+        # Actualizar estructura
+        cols = get_columns(conn, "prestamos")
+        sets = ["cuotas_totales = %s"]
+        params: List[Any] = [int(cuotas_pag)]
+        if "deuda_restante" in cols:
+            sets.append("deuda_restante = %s"); params.append(0)
+        if "pagado" in cols:
+            t = get_column_type(conn, "prestamos", "pagado")
+            if t and t.lower() == "boolean":
+                sets.append("pagado = %s"); params.append(True)
+        with conn.cursor() as cur:
+            cur.execute(f"UPDATE prestamos SET {', '.join(sets)} WHERE id = %s;", params + [id])
+        recompute_prestamo_totales(conn, id)
+        conn.close()
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Error al cerrar anticipadamente: {e}")
 
 # ------------------- Detalle de préstamo (1:1) -------------------
 @router.get("/{id}/detalle")
