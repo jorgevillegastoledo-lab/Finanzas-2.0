@@ -285,16 +285,33 @@ export default function Prestamos() {
     }
   }
 
-  // Pago de cuota
+  // Pago de cuota (con confirmación)
   async function marcarPago() {
     if (!sel) return;
     if (!pagoMes || !pagoAnio) { warning("Selecciona mes y año contable del pago."); return; }
+
+    // 🔔 Confirmación al estilo Facturación Tarjetas
+    const ok = await confirm({
+      title: "Confirmar pago",
+      message: `¿Marcar la cuota como pagada por ${fmtCLP(sel?.valor_cuota || 0)}?`,
+      confirmText: "Sí, pagar",
+    });
+    if (!ok) return;
+
     try {
-      await api.post(`/prestamos/${sel.id}/pagar`, { mes_contable: Number(pagoMes), anio_contable: Number(pagoAnio) });
+      await api.post(`/prestamos/${sel.id}/pagar`, {
+        mes_contable: Number(pagoMes),
+        anio_contable: Number(pagoAnio)
+      });
       await listar();
       success(`Pago registrado por ${fmtCLP(sel.valor_cuota)}.`);
     } catch (e) {
-      error({ title: "No pude registrar el pago", description: fmtError(e) });
+      if (e?.response?.status === 409) {
+        // Duplicado: ya existe pago para ese período
+        warning(e?.response?.data?.detail || "Ya existe un pago para ese mes/año.");
+      } else {
+        error({ title: "No pude registrar el pago", description: fmtError(e) });
+      }
     }
   }
 
@@ -546,7 +563,6 @@ export default function Prestamos() {
             </button>
 
             <div style={{ marginLeft: "auto", display: "flex", gap: 10 }}>
-              {/* NUEVOS botones según estado */}
               {(sel.cuotas_pagadas || 0) === 0 ? (
                 <button onClick={anularPrestamo} style={{ ...ui.btn, background: "#ff3b30" }}>
                   Anular préstamo

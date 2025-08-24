@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 import { useToast, useConfirm } from "../ui/notifications";
+import ConceptoPicker from "../components/ConceptoPicker";
 
 const MESES = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
@@ -105,13 +106,15 @@ export default function Gastos() {
 
   // --- Crear gasto ---
   const [nuevo, setNuevo] = useState({
-    nombre: "", monto: "",
+    nombre: "", // queda como compatibilidad, pero NO se usa para guardar
+    monto: "",
     mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL),
     pagado: false,
     es_recurrente: false,         // DB
     fp_ui: FP.EFECTIVO,           // UI interno
     tarjeta_id: "",               // si crédito
   });
+  const [nuevoConcepto, setNuevoConcepto] = useState(null); // {id,nombre,...} seleccionado
   const [savingNew, setSavingNew] = useState(false);
   
   // --- Selección y edición (panel inferior) ---
@@ -337,8 +340,13 @@ export default function Gastos() {
   // --- Crear ---
   async function crearGasto(e) {
     e?.preventDefault?.();
-    if (!nuevo.nombre || !nuevo.monto) {
-      warning("Nombre y monto son obligatorios.");
+
+    if (!nuevoConcepto || !nuevoConcepto.id) {
+      warning("Selecciona un concepto válido.");
+      return;
+    }
+    if (!nuevo.monto) {
+      warning("El monto es obligatorio.");
       return;
     }
     if (nuevo.fp_ui === FP.CREDITO && !nuevo.tarjeta_id) {
@@ -349,7 +357,10 @@ export default function Gastos() {
     try {
       setSavingNew(true);
       await api.post("/gastos", {
-        nombre: nuevo.nombre,
+        // IMPORTANTES: relacionar al concepto (y mantener nombre por compatibilidad)
+        concepto_id: Number(nuevoConcepto.id),
+        nombre: nuevoConcepto.nombre,
+
         monto: Number(nuevo.monto),
         mes: nuevo.mes ? Number(nuevo.mes) : null,
         anio: nuevo.anio ? Number(nuevo.anio) : null,
@@ -362,6 +373,7 @@ export default function Gastos() {
         nombre: "", monto: "", mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL), pagado: false,
         es_recurrente: false, fp_ui: FP.EFECTIVO, tarjeta_id: "",
       });
+      setNuevoConcepto(null);
       await loadGastos();
       success("Gasto creado");
     } catch (e) {
@@ -444,6 +456,14 @@ export default function Gastos() {
           return;
         }
 
+        // NUEVO: confirmación tipo Facturación Tarjetas
+        const ok = await confirm({
+          title: "Confirmar pago",
+          message: `¿Marcar el gasto como pagado por ${fmtCLP(Number(sel.monto || 0))}?`,
+          confirmText: "Sí, pagar",
+        });
+        if (!ok) return;
+
         const payloadPay = {
           gasto_id: sel.id,
           fecha: new Date().toISOString().slice(0,10),
@@ -508,12 +528,11 @@ export default function Gastos() {
             alignItems: "end",
           }}
         >
-          <Field label="Nombre">
-            <input
-              value={nuevo.nombre}
-              onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })}
-              style={styles.input}
-              placeholder="Ej: Internet"
+          <Field label="Concepto">
+            <ConceptoPicker
+              value={nuevoConcepto}
+              onChange={setNuevoConcepto}
+              placeholder="Escribe para buscar…"
             />
           </Field>
 
@@ -971,5 +990,6 @@ const styles = {
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
   modal:{ width:"min(1100px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
+
 
 

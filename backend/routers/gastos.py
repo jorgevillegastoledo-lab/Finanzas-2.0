@@ -1,7 +1,7 @@
 # routers/gastos.py
 from __future__ import annotations
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from calendar import monthrange
 
 import psycopg2.extras
@@ -19,6 +19,7 @@ router = APIRouter(prefix="/gastos", tags=["Gastos"])
 # ---------------- Helpers de período/cierre ----------------
 _CIERRE_OFFSET_DIAS = 5  # fijo, por ahora
 
+
 def _is_period_closed(mes: int, anio: int, offset_dias: int = _CIERRE_OFFSET_DIAS) -> bool:
     """
     Determina si el período (mes/anio) está cerrado.
@@ -33,18 +34,25 @@ def _is_period_closed(mes: int, anio: int, offset_dias: int = _CIERRE_OFFSET_DIA
     except Exception:
         return False
 
+
 def _raise_if_deshacer_cerrado(mes: int, anio: int):
     """Cierre sólo aplica a DESHACER (y a editar/eliminar cuando ya está pagado)."""
     if _is_period_closed(mes, anio):
         m = f"El período {str(mes).zfill(2)}/{anio} está cerrado. No se puede deshacer el pago."
         raise HTTPException(status_code=409, detail=m)
 
+
 def _msg_cierre(mes: int, anio: int) -> str:
     return f"El período {str(mes).zfill(2)}/{anio} está cerrado. No se permiten cambios en gastos pagados."
 
+
 # ---------- Schemas ----------
 class GastoIn(BaseModel):
-    nombre: str
+    # Maestro de conceptos (OBLIGATORIO por la BD)
+    concepto_id: Optional[int] = None
+    # Copia legible (para UI/consultas actuales)
+    nombre: Optional[str] = None
+
     monto: float
     mes: int
     anio: int
@@ -56,8 +64,12 @@ class GastoIn(BaseModel):
     es_recurrente: Optional[bool] = None
     fecha_vencimiento: Optional[str] = None
 
+
 class GastoUpdate(BaseModel):
+    # Permitir cambiar el concepto y/o el nombre (visible)
+    concepto_id: Optional[int] = None
     nombre: Optional[str] = None
+
     monto: Optional[float] = None
     mes: Optional[int] = Field(default=None, ge=1, le=12)
     anio: Optional[int] = Field(default=None, ge=2000, le=2100)
@@ -68,6 +80,7 @@ class GastoUpdate(BaseModel):
     con_tarjeta: Optional[bool] = None
     es_recurrente: Optional[bool] = None
     fecha_vencimiento: Optional[str] = None
+
 
 class GastoDetalleIn(BaseModel):
     compania: Optional[str] = None
@@ -91,12 +104,6 @@ class GastoDetalleIn(BaseModel):
     tags: Optional[Any] = None
     nota: Optional[str] = None
 
-class GastoPagarIn(BaseModel):
-    fecha: Optional[date] = None
-    monto: Optional[float] = None
-    metodo: Optional[str] = None
-    tarjeta_id: Optional[int] = None
-    nota: Optional[str] = None
 
 # ---------- Endpoints ----------
 @router.get("")
@@ -104,6 +111,9 @@ def listar_gastos(
     mes: int = Query(..., ge=1, le=12),
     anio: int = Query(..., ge=2000, le=2100),
 ):
+    """
+    Lista gastos del período. Mantiene ensure_recurrentes como antes.
+    """
     try:
         ensure_recurrentes(mes, anio)
         conn = get_conn()
@@ -118,16 +128,61 @@ def listar_gastos(
     except Exception as e:
         raise HTTPException(500, f"Error al cargar gastos: {e}")
 
+
 @router.post("")
 def crear_gasto(body: GastoIn):
+    """
+    Crea un gasto.
+    - Requiere concepto_id (la columna en BD es NOT NULL).
+    - Si no envías 'nombre', se copia desde el maestro 'conceptos'.
+    """
     try:
         conn = get_conn()
+
+        # --- VALIDAR concepto_id ---
+        if body.concepto_id is None:
+            conn.close()
+            raise HTTPException(400, "Debes elegir un concepto (concepto_id es obligatorio).")
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, nombre, activo FROM conceptos WHERE id = %s;",
+                (body.concepto_id,)
+            )
+            c = cur.fetchone()
+
+        if not c:
+            conn.close()
+            raise HTTPException(400, "El concepto indicado no existe.")
+        if not bool(c.get("activo", True)):
+            conn.close()
+            raise HTTPException(400, "El concepto está inactivo.")
+
+        # Si no llegó 'nombre', lo copiamos del maestro
+        nombre_copy = body.nombre if (body.nombre and body.nombre.strip()) else c["nombre"]
+
+        # Sólo insertar columnas válidas
         cols_exist = get_columns(conn, "gastos")
-        data = {k: v for k, v in body.dict().items() if k in cols_exist and v is not None}
-        if not data:
-            raise HTTPException(400, "No hay columnas válidas que insertar.")
-        columns = list(data.keys()); values = list(data.values())
+        payload = {
+            "concepto_id": body.concepto_id,
+            "nombre": nombre_copy,
+            "monto": body.monto,
+            "mes": body.mes,
+            "anio": body.anio,
+            "pagado": bool(body.pagado or False),
+            "es_recurrente": bool(body.es_recurrente or False),
+            "con_tarjeta": bool(body.con_tarjeta or False),
+            "tarjeta_id": body.tarjeta_id if body.con_tarjeta else None,
+            "cuotas": body.cuotas or 1,
+            "tipo": body.tipo,
+            "fecha_vencimiento": body.fecha_vencimiento,
+        }
+        data = {k: v for k, v in payload.items() if k in cols_exist and v is not None}
+
+        columns = list(data.keys())
+        values = list(data.values())
         placeholders = [sql.Placeholder() for _ in columns]
+
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             q = sql.SQL("INSERT INTO {t} ({c}) VALUES ({p}) RETURNING *;").format(
                 t=sql.Identifier("gastos"),
@@ -136,13 +191,23 @@ def crear_gasto(body: GastoIn):
             )
             cur.execute(q, values)
             row = cur.fetchone()
+
         conn.close()
         return {"ok": True, "data": _fix_json([row])[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"Error al crear gasto: {e}")
 
+
 @router.put("/{id}")
 def editar_gasto(id: int, body: GastoUpdate):
+    """
+    Actualiza un gasto.
+    - Permite cambiar concepto_id (validando que exista y esté activo).
+    - Si cambias concepto y no envías 'nombre', copiamos el del maestro.
+    - Mantiene reglas: no modificar 'pagado' por aquí; si está pagado y período cerrado, bloqueo.
+    """
     try:
         conn = get_conn()
         # Traer gasto actual
@@ -164,9 +229,32 @@ def editar_gasto(id: int, body: GastoUpdate):
             conn.close()
             raise HTTPException(409, _msg_cierre(int(current["mes"]), int(current["anio"])))
 
-        # 3) Ejecutar UPDATE (cualquier campo válido excepto 'pagado')
+        # --- Validación de concepto si viene ---
+        nombre_copy_from_concept = None
+        if "concepto_id" in incoming and incoming["concepto_id"] is not None:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT id, nombre, activo FROM conceptos WHERE id = %s;",
+                    (incoming["concepto_id"],)
+                )
+                c = cur.fetchone()
+            if not c:
+                conn.close()
+                raise HTTPException(400, "El nuevo concepto no existe.")
+            if not bool(c.get("activo", True)):
+                conn.close()
+                raise HTTPException(400, "El nuevo concepto está inactivo.")
+            if not incoming.get("nombre"):
+                nombre_copy_from_concept = c["nombre"]
+
+        # 3) Ejecutar UPDATE (excepto 'pagado')
         cols_exist = get_columns(conn, "gastos")
         data = {k: v for k, v in incoming.items() if k in cols_exist}
+
+        # Si cambiamos concepto y no llegó nombre, copiamos el del concepto
+        if ("concepto_id" in data) and (nombre_copy_from_concept is not None) and ("nombre" in cols_exist):
+            data["nombre"] = nombre_copy_from_concept
+
         if not data:
             conn.close()
             raise HTTPException(400, "No hay columnas válidas que actualizar.")
@@ -186,6 +274,7 @@ def editar_gasto(id: int, body: GastoUpdate):
         raise
     except Exception as e:
         raise HTTPException(500, f"Error al editar gasto: {e}")
+
 
 @router.delete("/{id}")
 def eliminar_gasto(id: int):
@@ -211,8 +300,22 @@ def eliminar_gasto(id: int):
     except Exception as e:
         raise HTTPException(500, f"Error al eliminar gasto: {e}")
 
+
+# ---------------- Pagos de gasto ----------------
+class GastoPagarIn(BaseModel):
+    fecha: Optional[date] = None
+    monto: Optional[float] = None
+    metodo: Optional[str] = None
+    tarjeta_id: Optional[int] = None
+    nota: Optional[str] = None
+
+
 @router.post("/{id}/pagar")
 def pagar_gasto(id: int, body: GastoPagarIn):
+    """
+    Registra un pago en pagos_gasto y marca el gasto como pagado.
+    *Se permite pagar incluso si el período ya está “cerrado”*.
+    """
     try:
         conn = get_conn()
         ensure_pagos_gasto_table(conn)
@@ -228,8 +331,6 @@ def pagar_gasto(id: int, body: GastoPagarIn):
         if not gasto:
             conn.close()
             raise HTTPException(404, "Gasto no encontrado")
-
-        # IMPORTANTE: pagar SI está permitido aun si el período está cerrado
 
         # si ya está marcado pagado, no permitir otro registro
         if bool(gasto.get("pagado", False)):
@@ -259,7 +360,7 @@ def pagar_gasto(id: int, body: GastoPagarIn):
     except Exception as e:
         raise HTTPException(500, f"Error al pagar gasto: {e}")
 
-# ----- Deshacer último pago -----
+
 @router.post("/{id}/deshacer")
 def deshacer_pago_gasto(id: int):
     """
@@ -315,7 +416,7 @@ def deshacer_pago_gasto(id: int):
     except Exception as e:
         raise HTTPException(500, f"Error al deshacer pago: {e}")
 
-# ----- Listar pagos del gasto -----
+
 @router.get("/{id}/pagos")
 def listar_pagos_gasto(id: int):
     try:
@@ -337,6 +438,7 @@ def listar_pagos_gasto(id: int):
     except Exception as e:
         raise HTTPException(500, f"Error al listar pagos: {e}")
 
+
 # ---------- Detalle (1:1 con gastos) ----------
 @router.get("/{id}/detalle")
 def get_gasto_detalle(id: int):
@@ -357,6 +459,7 @@ def get_gasto_detalle(id: int):
         return {"ok": True, "data": _fix_json([row])[0] if row else {}}
     except Exception as e:
         raise HTTPException(500, f"Error al leer detalle de gasto: {e}")
+
 
 @router.put("/{id}/detalle")
 def upsert_gasto_detalle(id: int, body: GastoDetalleIn):
@@ -422,6 +525,7 @@ def upsert_gasto_detalle(id: int, body: GastoDetalleIn):
         return {"ok": True, "data": _fix_json([row])[0] if row else None}
     except Exception as e:
         raise HTTPException(500, f"Error al guardar detalle de gasto: {e}")
+
 
 @router.delete("/{id}/detalle")
 def delete_gasto_detalle(id: int):

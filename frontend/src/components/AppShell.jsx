@@ -1,10 +1,23 @@
 // frontend/src/components/AppShell.jsx
-import React, { useContext } from "react";
-import { NavLink } from "react-router-dom";
+import React, { useContext, useState, useRef, useEffect } from "react";
+import { NavLink, useNavigate } from "react-router-dom";
 import { AuthContext } from "../context/AuthContext";
 
 export default function AppShell({ title = "Panel", actions, children }) {
   const { user, logout } = useContext(AuthContext);
+  const navigate = useNavigate();
+
+  const [openAdmin, setOpenAdmin] = useState(false);
+  const adminRef = useRef(null);
+
+  // cerrar dropdown al click fuera
+  useEffect(() => {
+    function onDoc(e) {
+      if (adminRef.current && !adminRef.current.contains(e.target)) setOpenAdmin(false);
+    }
+    document.addEventListener("click", onDoc);
+    return () => document.removeEventListener("click", onDoc);
+  }, []);
 
   const navStyle = ({ isActive }) => ({
     ...ui.navLink,
@@ -27,7 +40,33 @@ export default function AppShell({ title = "Panel", actions, children }) {
             <NavLink to="/prestamos" style={navStyle}>Préstamos</NavLink>
             <NavLink to="/facturacion" style={navStyle}>Facturación tarjetas</NavLink>
             <NavLink to="/sueldo" style={navStyle}>Ingresar sueldo</NavLink>
-            <NavLink to="/tarjetas" style={navStyle}>Tarjetas</NavLink> {/* último */}
+            <NavLink to="/tarjetas" style={navStyle}>Tarjetas</NavLink>
+
+            {/* ---- Dropdown MAESTROS ---- */}
+            <div ref={adminRef} style={{ position: "relative" }}>
+              <button
+                style={{ ...ui.navLink, ...ui.dropdownBtn }}
+                onClick={() => setOpenAdmin((v) => !v)}
+              >
+                Maestros ▾
+              </button>
+              {openAdmin && (
+                <div style={ui.dropdown}>
+                  <button
+                    style={ui.dropdownItem}
+                    onClick={() => { setOpenAdmin(false); navigate("/admin/conceptos"); }}
+                  >
+                    Conceptos de gasto
+                  </button>
+                  <button
+                    style={ui.dropdownItem}
+                    onClick={() => { setOpenAdmin(false); navigate("/admin/bancos"); }}
+                  >
+                    Bancos
+                  </button>
+                </div>
+              )}
+            </div>
           </nav>
         </div>
 
@@ -68,7 +107,7 @@ export const ui = {
   brand: { display: "flex", alignItems: "center", gap: 10, fontWeight: 800 },
   brandMuted: { opacity: .6, fontWeight: 400 },
 
-  nav: { display: "flex", gap: 8 },
+  nav: { display: "flex", gap: 8, alignItems: "center" },
   navLink: {
     padding: "8px 10px",
     borderRadius: 10,
@@ -80,6 +119,31 @@ export const ui = {
   navLinkActive: {
     background: "#71d07e",
     color: "#032312",
+  },
+  dropdownBtn: { cursor: "pointer", border: 0 },
+
+  dropdown: {
+    position: "absolute",
+    top: "110%",
+    left: 0,
+    background: "#121a2b",
+    border: "1px solid #1f2a44",
+    borderRadius: 10,
+    boxShadow: "0 12px 28px rgba(0,0,0,.35)",
+    minWidth: 220,
+    padding: 6,
+    display: "grid",
+    gap: 4,
+    zIndex: 20,
+  },
+  dropdownItem: {
+    textAlign: "left",
+    padding: "8px 10px",
+    borderRadius: 8,
+    background: "transparent",
+    color: "#e6f0ff",
+    cursor: "pointer",
+    border: 0,
   },
 
   main: { padding: 24, display: "grid", gap: 16 },

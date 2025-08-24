@@ -1,3 +1,4 @@
+// frontend/src/api/api.js
 import axios from "axios";
 
 const api = axios.create({
@@ -6,7 +7,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem("token");
-  console.log("[api] token:", token); // <-- debe mostrar el JWT (eyJ...)
+  console.log("[api] token:", token);
   if (token) {
     config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
@@ -14,7 +15,6 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// opcional: si 401, redirigir a login
 api.interceptors.response.use(
   (res) => res,
   (error) => {
@@ -28,3 +28,20 @@ api.interceptors.response.use(
 );
 
 export default api;
+
+/* ======= Helpers Maestros ======= */
+export const ConceptosAPI = {
+  list: (activos = "true") => api.get(`/conceptos`, { params: { activos } }),
+  create: (payload) => api.post(`/conceptos`, payload),
+  update: (id, payload) => api.patch(`/conceptos/${id}`, payload),
+  setActivo: (id, activo) => api.patch(`/conceptos/${id}/activo`, { activo }),
+};
+
+export const BancosAPI = {
+  list: (activos = "true") => api.get(`/bancos`, { params: { activos } }),
+  create: (payload) => api.post(`/bancos`, payload),
+  update: (id, payload) => api.patch(`/bancos/${id}`, payload),
+  setActivo: (id, activo) => api.patch(`/bancos/${id}/activo`, { activo }),
+};
+
+

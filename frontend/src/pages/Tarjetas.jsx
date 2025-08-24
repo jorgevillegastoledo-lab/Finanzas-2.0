@@ -9,6 +9,9 @@ const emptyEdit   = { nombre:"", banco:"", tipo:"credito", limite:"", cierre_dia
 const emptyDetalle = { alias:"", pan_last4:"", expiracion_mes:"", expiracion_anio:"", fecha_entrega:"", red:"" };
 
 export default function Tarjetas() {
+  const { success, error, warning } = useToast();
+  const confirm = useConfirm();
+
   // ── data principal
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -58,7 +61,7 @@ export default function Tarjetas() {
   const resetCreate = () => setCreateForm(emptyCreate);
   const submitCreate = async (e) => {
     e.preventDefault();
-    if (!createForm.nombre.trim()) return ui.toast.warn("Nombre es obligatorio");
+    if (!createForm.nombre.trim()) { warning("Nombre es obligatorio"); return; }
     setBusyCreate(true);
     try {
       const payload = {
@@ -71,10 +74,10 @@ export default function Tarjetas() {
         activa: !!createForm.activa,
       };
       await api.post("/tarjetas", payload);
-      ui.toast.success("Tarjeta creada");
+      success("Tarjeta creada");
       resetCreate(); await load();
     } catch (e) {
-      ui.toast.error(e?.response?.data?.detail || "No pude guardar");
+      error({ title:"No pude guardar", description: e?.response?.data?.detail || String(e) });
     } finally { setBusyCreate(false); }
   };
 
@@ -96,14 +99,21 @@ export default function Tarjetas() {
   };
 
   const deleteCard = async (id) => {
-    if (!confirm("¿Desactivar tarjeta?")) return;
+    const ok = await confirm({
+      title: "¿Desactivar tarjeta?",
+      message: "La tarjeta dejará de aparecer como activa. Podrás reactivarla editándola o creando otra.",
+      confirmText: "Desactivar",
+      tone: "danger",
+    });
+    if (!ok) return;
+
     try {
       await api.delete(`/tarjetas/${id}`);
       if (editSel?.id === id) { setEditSel(null); setEditForm(emptyEdit); }
-      ui.toast.success("Tarjeta desactivada");
+      success("Tarjeta desactivada");
       await load();
     } catch (e) {
-      ui.toast.error(e?.response?.data?.detail || "No pude eliminar");
+      error({ title:"No pude desactivar", description: e?.response?.data?.detail || String(e) });
     }
   };
 
@@ -122,10 +132,10 @@ export default function Tarjetas() {
         activa: !!editForm.activa,
       };
       await api.put(`/tarjetas/${editSel.id}`, payload);
-      ui.toast.success("Cambios guardados");
+      success("Cambios guardados");
       await load();
     } catch (e) {
-      ui.toast.error(e?.response?.data?.detail || "No pude guardar cambios");
+      error({ title:"No pude guardar cambios", description: e?.response?.data?.detail || String(e) });
     } finally { setBusyEdit(false); }
   };
 
@@ -133,7 +143,7 @@ export default function Tarjetas() {
   const openDetalles = async () => {
     // id desde menú o tarjeta en edición
     const id = menu.target?.id ?? editSel?.id;
-    if (!id) { ui.toast.warn("Primero selecciona una tarjeta"); return; }
+    if (!id) { warning("Primero selecciona una tarjeta"); return; }
 
     setDetTarjetaId(id);
     setDetalle(emptyDetalle);
@@ -152,20 +162,20 @@ export default function Tarjetas() {
         red: (d.red ?? "").toLowerCase(),
       });
     } catch {
-      // sin detalle: se queda vacío
+      /* sin detalle */
     }
   };
 
   const saveDetalle = async () => {
-    if (!detTarjetaId) { ui.toast.warn("No hay tarjeta seleccionada"); return; }
+    if (!detTarjetaId) { warning("No hay tarjeta seleccionada"); return; }
 
     // validaciones mínimas en cliente
     if (detalle.pan_last4 && String(detalle.pan_last4).replace(/\D/g,"").length !== 4) {
-      ui.toast.warn("Los 'Últimos 4' deben tener exactamente 4 dígitos.");
+      warning("Los 'Últimos 4' deben tener exactamente 4 dígitos.");
       return;
     }
     if (detalle.expiracion_mes && !(Number(detalle.expiracion_mes) >= 1 && Number(detalle.expiracion_mes) <= 12)) {
-      ui.toast.warn("Mes de expiración inválido.");
+      warning("Mes de expiración inválido.");
       return;
     }
 
@@ -183,15 +193,10 @@ export default function Tarjetas() {
       };
 
       await api.put(`/tarjetas/${detTarjetaId}/detalle`, payload);
-      ui.toast.success("Detalles guardados");
+      success("Detalles guardados");
       setDetOpen(false);
     } catch (e) {
-      const msg =
-        e?.response?.data?.detail ||
-        e?.response?.data?.error  ||
-        e?.message ||
-        "No pude guardar el detalle";
-      if (ui?.toast?.error) ui.toast.error(msg); else alert(msg);
+      error({ title:"No pude guardar el detalle", description: e?.response?.data?.detail || e?.response?.data?.error || String(e) });
     } finally {
       setDetBusy(false);
     }
@@ -199,14 +204,22 @@ export default function Tarjetas() {
 
   const deleteDetalle = async () => {
     if (!detTarjetaId) return;
-    if (!confirm("¿Eliminar los detalles guardados de esta tarjeta?")) return;
+
+    const ok = await confirm({
+      title: "¿Eliminar detalles?",
+      message: "Se eliminará la información informativa (alias, últimos 4, expiración, etc.) de esta tarjeta.",
+      confirmText: "Eliminar",
+      tone: "danger",
+    });
+    if (!ok) return;
+
     try {
       setDetBusy(true);
       await api.delete(`/tarjetas/${detTarjetaId}/detalle`);
-      ui.toast.success("Detalle eliminado");
+      success("Detalle eliminado");
       setDetOpen(false);
     } catch (e) {
-      ui.toast.error(e?.response?.data?.detail || "No pude eliminar el detalle");
+      error({ title:"No pude eliminar el detalle", description: e?.response?.data?.detail || String(e) });
     } finally { setDetBusy(false); }
   };
 
@@ -425,5 +438,6 @@ const styles = {
   // mismo tono "info/teal" que en Gastos
   btnInfo:{ background:"#17a2b8" }
 };
+
 
 

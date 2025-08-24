@@ -1,4 +1,4 @@
-ï»¿// frontend/src/pages/Dashboard.jsx
+// frontend/src/pages/Dashboard.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import AppShell, { ui } from "../components/AppShell";
@@ -23,7 +23,7 @@ const fmtCLP = (n) =>
     .format(Number(n || 0));
 
 /* Helpers */
-const ymIndex = (m, y) => y * 12 + m - 1;
+const ymIndex = (m, y) => (y * 12 + m - 1);
 const activoEnMes = (p, mes, anio) => {
   const m0 = Number(p?.primer_mes || 0);
   const y0 = Number(p?.primer_anio || 0);
@@ -36,20 +36,15 @@ const activoEnMes = (p, mes, anio) => {
 };
 const esCreditoGasto = (g) => {
   if (typeof g?.con_tarjeta === "boolean") return g.con_tarjeta;
-  const s = String(g?.forma_pago || "")
-    .normalize("NFD").replace(/\p{Diacritic}/gu, "")
-    .toUpperCase();
+  const s = String(g?.forma_pago || "").normalize("NFD").replace(/\p{Diacritic}/gu, "").toUpperCase();
   return s === "CREDITO";
 };
 function addMonths(y, m, add) {
-  const total = y * 12 + (m - 1) + add;
+  const total = (y * 12 + (m - 1)) + add;
   const ny = Math.floor(total / 12);
   const nm = (total % 12) + 1;
   return { anio: ny, mes: nm };
 }
-const sueldoKey = (y, m) => `sueldo:${y}-${String(m).padStart(2, "0")}`;
-const ymKey = (y, m) => `${y}-${String(m).padStart(2, "0")}`;
-const digitsOnly = (v) => Number(String(v ?? "").replace(/[^\d]/g, "") || 0);
 
 export default function Dashboard() {
   const navigate = useNavigate();
@@ -62,21 +57,21 @@ export default function Dashboard() {
   const [gastos, setGastos] = useState([]);
   const [facturas, setFacturas] = useState([]);
   const [prestamos, setPrestamos] = useState([]);
-  const [resumenPrestamos, setResumenPrestamos] = useState([]); // para Ãºltimos pagos
+  const [resumenPrestamos, setResumenPrestamos] = useState([]); // para ¨²ltimos pagos
 
   // kpis
   const [sueldo, setSueldo] = useState(0);
 
-  // desglose E/D / CRÃ‰DITO
+  // desglose ED / CR¨¦DITO
   const [edPagado, setEdPagado] = useState(0);
   const [edPendiente, setEdPendiente] = useState(0);
   const [creditoMes, setCreditoMes] = useState(0);
 
-  // facturaciÃ³n tarjetas
+  // facturaci¨®n tarjetas
   const [factPagado, setFactPagado] = useState(0);
   const [factPendiente, setFactPendiente] = useState(0);
 
-  // prÃ©stamos
+  // pr¨¦stamos
   const [cuotasEsperadas, setCuotasEsperadas] = useState(0);
   const [cuotasPagadasMes, setCuotasPagadasMes] = useState(0);
   const [totalDeudaPrestamos, setTotalDeudaPrestamos] = useState(0);
@@ -97,28 +92,22 @@ export default function Dashboard() {
         api.get("/facturas", { params: q }),
         api.get("/prestamos"),
         api.get("/prestamos/resumen"),
-        api.get("/sueldos", { params: q }), // si no existe, fallback a localStorage
+        api.get("/sueldos", { params: q }), // opcional
       ]);
 
       // gastos
-      const g = rg.status === "fulfilled"
-        ? (Array.isArray(rg.value.data) ? rg.value.data : (rg.value.data?.data ?? []))
-        : [];
+      const g = rg.status === "fulfilled" ? (Array.isArray(rg.value.data) ? rg.value.data : (rg.value.data?.data ?? [])) : [];
       setGastos(g);
 
       // facturas del mes
-      const f = rf.status === "fulfilled"
-        ? (Array.isArray(rf.value.data) ? rf.value.data : (rf.value.data?.data ?? []))
-        : [];
+      const f = rf.status === "fulfilled" ? (Array.isArray(rf.value.data) ? rf.value.data : (rf.value.data?.data ?? [])) : [];
       setFacturas(f);
 
-      // prÃ©stamos (todos)
-      const p = rp.status === "fulfilled"
-        ? (Array.isArray(rp.value.data) ? rp.value.data : (rp.value.data?.data ?? []))
-        : [];
+      // pr¨¦stamos (todos)
+      const p = rp.status === "fulfilled" ? (Array.isArray(rp.value.data) ? rp.value.data : (rp.value.data?.data ?? [])) : [];
       setPrestamos(p);
 
-      // resumen prÃ©stamos (deuda + Ãºltimo pago)
+      // resumen pr¨¦stamos (deuda + ¨²ltimo pago)
       let resumen = [];
       if (rr.status === "fulfilled") {
         resumen = Array.isArray(rr.value.data) ? rr.value.data : (rr.value.data?.data ?? []);
@@ -140,10 +129,8 @@ export default function Dashboard() {
       }
       setTotalDeudaPrestamos(deudaTotal);
 
-      // SUELDO: API -> fallback localStorage sueldos_v1 -> fallback key antigua sueldo:YYYY-MM
+      // sueldo (si hay API; si no, queda 0)
       let montoSueldo = 0;
-
-      // 1) API
       if (rs.status === "fulfilled") {
         const dS = rs.value.data;
         if (Array.isArray(dS)) {
@@ -153,32 +140,9 @@ export default function Dashboard() {
           montoSueldo = Number(dS?.monto || dS?.data?.monto || 0);
         }
       }
-
-      // 2) localStorage sueldos_v1 (formato { "YYYY-MM": monto })
-      if (!montoSueldo || Number.isNaN(montoSueldo)) {
-        try {
-          const mapRaw = localStorage.getItem("sueldos_v1");
-          if (mapRaw) {
-            const map = JSON.parse(mapRaw);
-            const key = ymKey(q.anio, q.mes);
-            const val = map?.[key];
-            const n = digitsOnly(val);
-            if (n > 0) montoSueldo = n;
-          }
-        } catch { /* ignore parse errors */ }
-      }
-
-      // 3) fallback clave antigua sueldo:YYYY-MM
-      if (!montoSueldo || Number.isNaN(montoSueldo)) {
-        const k = sueldoKey(q.anio, q.mes);
-        const raw = localStorage.getItem(k);
-        const n = digitsOnly(raw);
-        if (n > 0) montoSueldo = n;
-      }
-
       setSueldo(montoSueldo);
 
-      // desglose gastos (E/D vs crÃ©dito)
+      // desglose gastos (E/D vs cr¨¦dito)
       let _edPagado = 0, _edPend = 0, _credito = 0;
       for (const x of g) {
         const m = Number(x.monto || 0);
@@ -190,13 +154,12 @@ export default function Dashboard() {
       setEdPendiente(_edPend);
       setCreditoMes(_credito);
 
-      // facturaciÃ³n tarjetas: pagada / pendiente
-      const sumFact = (arr) => arr.reduce((acc, it) =>
-        acc + Number(it.total ?? it.monto ?? it.total_facturado ?? 0), 0);
+      // facturaci¨®n tarjetas: pagada / pendiente
+      const sumFact = (arr) => arr.reduce((acc, it) => acc + Number(it.total ?? it.monto ?? it.total_facturado ?? 0), 0);
       setFactPagado(sumFact(f.filter(x => !!x.pagada)));
       setFactPendiente(sumFact(f.filter(x => !x.pagada)));
 
-      // prÃ©stamos: cuotas esperadas del mes y pagos del mes
+      // pr¨¦stamos: cuotas esperadas del mes y pagos del mes
       const esperadas = p
         .filter(pr => activoEnMes(pr, q.mes, q.anio))
         .reduce((acc, pr) => acc + Number(pr.valor_cuota || 0), 0);
@@ -235,7 +198,7 @@ export default function Dashboard() {
     setTimeout(loadAll, 0);
   }
 
-  // totales bÃ¡sicos
+  // totales
   const totalED = useMemo(() => edPagado + edPendiente, [edPagado, edPendiente]);
   const totalFacturacion = useMemo(() => factPagado + factPendiente, [factPagado, factPendiente]);
   const totalMensualSinCredito = useMemo(
@@ -243,37 +206,26 @@ export default function Dashboard() {
     [totalED, cuotasEsperadas, totalFacturacion]
   );
 
-  // LIQUIDEZ
-  const liquidezReal = useMemo(
-    () => Number(sueldo || 0) - (Number(edPagado || 0) + Number(cuotasPagadasMes || 0) + Number(factPagado || 0)),
-    [sueldo, edPagado, cuotasPagadasMes, factPagado]
-  );
-  const liquidezTeorica = useMemo(
-    () => Number(sueldo || 0) - ((Number(totalED || 0) + Number(creditoMes || 0)) + Number(cuotasEsperadas || 0) + Number(totalFacturacion || 0)),
-    [sueldo, totalED, creditoMes, cuotasEsperadas, totalFacturacion]
-  );
-
-  // Ãºltimos pagos prÃ©stamos (ordenados)
+  // ¨²ltimos pagos pr¨¦stamos (ordenar por m¨¢s reciente)
   const ultimosPagos = useMemo(() => {
-    const src = (resumenPrestamos || []).map(r => {
+    const src = resumenPrestamos?.map(r => {
       let um = Number(r.ultimo_mes || 0);
       let ua = Number(r.ultimo_anio || 0);
 
+      // fallback si no viene en el resumen pero tiene cuotas_pagadas y fecha inicial
       if ((!um || !ua) && (r.cuotas_pagadas > 0) && r.primer_mes && r.primer_anio) {
         const { anio, mes } = addMonths(Number(r.primer_anio), Number(r.primer_mes), Number(r.cuotas_pagadas) - 1);
         um = mes; ua = anio;
       }
       return {
-        id: r.id,
-        nombre: r.nombre || `PrÃ©stamo ${r.id}`,
-        ultimo_mes: um || null,
-        ultimo_anio: ua || null
+        id: r.id, nombre: r.nombre || `Pr¨¦stamo ${r.id}`,
+        ultimo_mes: um || null, ultimo_anio: ua || null
       };
-    });
+    }) || [];
 
     return src
-      .sort((a, b) => ymIndex(b.ultimo_mes || 0, b.ultimo_anio || 0) - ymIndex(a.ultimo_mes || 0, a.ultimo_anio || 0))
-      .slice(0, 6);
+      .sort((a, b) => (ymIndex(b.ultimo_mes || 0, b.ultimo_anio || 0) - ymIndex(a.ultimo_mes || 0, a.ultimo_anio || 0)))
+      .slice(0, 6); // muestra hasta 6 en el dashboard
   }, [resumenPrestamos]);
 
   const clickable = (onClick) => ({
@@ -282,9 +234,6 @@ export default function Dashboard() {
     transition: "transform .08s ease",
     border: "1px solid #23304a",
   });
-
-  const showSueldo = Number(sueldo) > 0;
-  const signColor = (n) => (n >= 0 ? "#2ec4b6" : "#d90429");
 
   return (
     <AppShell title="Dashboard" actions={<button onClick={loadAll} style={ui.btn}>Actualizar</button>}>
@@ -305,67 +254,50 @@ export default function Dashboard() {
       {/* fila 1 */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16 }}>
         <div style={clickable()} onClick={() => navigate(ROUTE_GASTOS)}>
-          <div style={styles.kpiTitle}>Gastos Efectivo/DÃ©bito (mes)</div>
+          <div style={styles.kpiTitle}>Gastos Efectivo/D¨¦bito (mes)</div>
           <div style={styles.kpiValue}>{fmtCLP(totalED)}</div>
-          <div style={styles.kpiSub}>Pagado: {fmtCLP(edPagado)} Â· Pendiente: {fmtCLP(edPendiente)}</div>
+          <div style={styles.kpiSub}>Pagado: {fmtCLP(edPagado)} ¡¤ Pendiente: {fmtCLP(edPendiente)}</div>
         </div>
 
         <div style={clickable()} onClick={() => navigate(ROUTE_GASTOS)}>
-          <div style={styles.kpiTitle}>Gastos a CRÃ‰DITO (mes)</div>
+          <div style={styles.kpiTitle}>Gastos a CR¨¦DITO (mes)</div>
           <div style={{ ...styles.kpiValue, color: "#7c3aed" }}>{fmtCLP(creditoMes)}</div>
           <div style={styles.kpiSub}>No se suman a los totales; indicador de control</div>
         </div>
 
         <div style={clickable()} onClick={() => navigate(ROUTE_FACTURACION)}>
-          <div style={styles.kpiTitle}>FacturaciÃ³n tarjetas (mes)</div>
+          <div style={styles.kpiTitle}>Facturaci¨®n tarjetas (mes)</div>
           <div style={styles.kpiValue}>{fmtCLP(totalFacturacion)}</div>
-          <div style={styles.kpiSub}>Pagada: {fmtCLP(factPagado)} Â· Pendiente: {fmtCLP(factPendiente)}</div>
+          <div style={styles.kpiSub}>Pagada: {fmtCLP(factPagado)} ¡¤ Pendiente: {fmtCLP(factPendiente)}</div>
         </div>
       </div>
 
       {/* fila 2 */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginTop: 16 }}>
         <div style={clickable()} onClick={() => navigate(ROUTE_PRESTAMOS)}>
-          <div style={styles.kpiTitle}>Cuotas prÃ©stamos (vigentes mes)</div>
+          <div style={styles.kpiTitle}>Cuotas pr¨¦stamos (vigentes mes)</div>
           <div style={styles.kpiValue}>{fmtCLP(cuotasEsperadas)}</div>
           <div style={styles.kpiSub}>
-            Pagado: {fmtCLP(cuotasPagadasMes)} Â· Pendiente: {fmtCLP(Math.max(cuotasEsperadas - cuotasPagadasMes, 0))}
+            Pagado: {fmtCLP(cuotasPagadasMes)} ¡¤ Pendiente: {fmtCLP(Math.max(cuotasEsperadas - cuotasPagadasMes, 0))}
           </div>
         </div>
 
-        {showSueldo && (
-          <div style={clickable()} onClick={() => navigate(ROUTE_SUELDO)}>
-            <div style={styles.kpiTitle}>Sueldo del mes</div>
-            <div style={styles.kpiValue}>{fmtCLP(sueldo)}</div>
-            <div style={styles.kpiSub}>Toca para editar</div>
-          </div>
-        )}
+        <div style={clickable()} onClick={() => navigate(ROUTE_SUELDO)}>
+          <div style={styles.kpiTitle}>Sueldo del mes</div>
+          <div style={styles.kpiValue}>{fmtCLP(sueldo)}</div>
+          <div style={styles.kpiSub}>Guardado localmente (no en BD) ¡¤ Editar sueldo</div>
+        </div>
 
         <div style={ui.card}>
-          <div style={styles.kpiTitle}>Total mensual (sin compras a CRÃ‰DITO)</div>
+          <div style={styles.kpiTitle}>Total mensual (sin compras a CR¨¦DITO)</div>
           <div style={{ ...styles.kpiValue, color: "#d90429" }}>{fmtCLP(totalMensualSinCredito)}</div>
-          <div style={styles.kpiSub}>E/D + Cuotas esperadas + FacturaciÃ³n</div>
+          <div style={styles.kpiSub}>E/D + Cuotas esperadas + Facturaci¨®n</div>
         </div>
       </div>
 
-      {/* fila 3: KPIs de Liquidez */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginTop: 16 }}>
-        <div style={ui.card}>
-          <div style={styles.kpiTitle}>Liquidez (REAL)</div>
-          <div style={{ ...styles.kpiValue, color: signColor(liquidezReal) }}>{fmtCLP(liquidezReal)}</div>
-          <div style={styles.kpiSub}>Sueldo - (E/D pagado + Cuotas pagadas + FacturaciÃ³n pagada)</div>
-        </div>
-
-        <div style={ui.card}>
-          <div style={styles.kpiTitle}>Liquidez (TEÃ“RICA)</div>
-          <div style={{ ...styles.kpiValue, color: signColor(liquidezTeorica) }}>{fmtCLP(liquidezTeorica)}</div>
-          <div style={styles.kpiSub}>Sueldo - ((E/D total + CrÃ©dito) + Cuotas esperadas + FacturaciÃ³n total)</div>
-        </div>
-      </div>
-
-      {/* Ãšltimos pagos de prÃ©stamos */}
+      {/* ¨²ltimos pagos de pr¨¦stamos */}
       <div style={{ ...ui.card, marginTop: 16 }}>
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>Ãšltimos pagos de prÃ©stamos</div>
+        <div style={{ fontWeight: 700, marginBottom: 10 }}>¨²ltimos pagos de pr¨¦stamos</div>
         {ultimosPagos.length === 0 ? (
           <div style={{ opacity: 0.8 }}>No hay pagos registrados.</div>
         ) : (
@@ -374,7 +306,7 @@ export default function Dashboard() {
               <div key={r.id} style={{ padding: "8px 10px", border: "1px solid #23304a", borderRadius: 8, background: "#0e1626" }}>
                 <div style={{ fontWeight: 600 }}>{r.nombre}</div>
                 <div style={{ fontSize: 13, opacity: 0.9 }}>
-                  Ãšltimo pago: {r.ultimo_mes && r.ultimo_anio ? `${MESES[r.ultimo_mes]} ${r.ultimo_anio}` : "â€”"}
+                  ¨²ltimo pago: {r.ultimo_mes && r.ultimo_anio ? `${MESES[r.ultimo_mes]} ${r.ultimo_anio}` : "¡ª"}
                 </div>
               </div>
             ))}
@@ -384,9 +316,9 @@ export default function Dashboard() {
 
       {/* info adicional */}
       <div style={{ ...ui.card, marginTop: 16 }}>
-        <div style={{ fontWeight: 700, marginBottom: 6 }}>InformaciÃ³n</div>
+        <div style={{ fontWeight: 700, marginBottom: 6 }}>Informaci¨®n</div>
         <div style={{ opacity: 0.9 }}>
-          Total de <b>deuda vigente en prÃ©stamos</b>: {fmtCLP(totalDeudaPrestamos)}
+          Total de <b>deuda vigente en pr¨¦stamos</b>: {fmtCLP(totalDeudaPrestamos)}
         </div>
       </div>
     </AppShell>

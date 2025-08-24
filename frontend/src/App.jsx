@@ -13,9 +13,14 @@ import Tarjetas from "./pages/Tarjetas";
 import Sueldo from "./pages/Sueldo";
 import FacturacionTarjetas from "./pages/FacturacionTarjetas";
 
+// NUEVO
+import AdminConceptos from "./pages/AdminConceptos";
+import AdminBancos from "./pages/AdminBancos";
+
 export default function App() {
   return (
     <AuthProvider>
+      {/* (si usas notifications, envuelve aquí; lo dejo como lo tenías) */}
       <Routes>
         {/* Público */}
         <Route path="/login" element={<Login />} />
@@ -66,6 +71,24 @@ export default function App() {
           element={
             <ProtectedRoute>
               <Tarjetas />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* NUEVO: Maestros */}
+        <Route
+          path="/admin/conceptos"
+          element={
+            <ProtectedRoute>
+              <AdminConceptos />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/bancos"
+          element={
+            <ProtectedRoute>
+              <AdminBancos />
             </ProtectedRoute>
           }
         />
