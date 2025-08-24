@@ -773,77 +773,107 @@ export default function Gastos() {
           </div>
 
           <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto auto",
-              gap: 10,
-              alignItems: "end",
-            }}
-          >
-            <Field label="Nombre">
-              <input value={edit.nombre} onChange={(e) => setEdit({ ...edit, nombre: e.target.value })} style={styles.input}/>
-            </Field>
+  style={{
+    display: "grid",
+    gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto auto",
+    gap: 10,
+    alignItems: "end",
+  }}
+>
+  {/* Concepto (solo lectura) */}
+  <Field label="Concepto">
+    <input
+      style={styles.input}
+      value={sel?.nombre || (sel?.concepto_id ? `Concepto #${sel.concepto_id}` : "")}
+      disabled
+      title="El concepto no se puede cambiar en edición. Si te equivocaste, elimina el gasto (si no está pagado) y créalo de nuevo."
+    />
+  </Field>
 
-            <Field label="Monto">
-              <input type="number" value={edit.monto} onChange={(e) => setEdit({ ...edit, monto: e.target.value })} style={styles.input}/>
-            </Field>
+  {/* Monto (editable) */}
+  <Field label="Monto">
+    <input
+      type="number"
+      value={edit.monto}
+      onChange={(e) => setEdit({ ...edit, monto: e.target.value })}
+      style={styles.input}
+    />
+  </Field>
 
-            <Field label="Mes">
-              <select value={edit.mes || ""} onChange={(e) => setEdit({ ...edit, mes: e.target.value })} style={styles.input}>
-                <option value="">Mes</option>
-                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                  <option key={m} value={m}>{MESES[m]}</option>
-                ))}
-              </select>
-            </Field>
+  {/* Mes (solo lectura) */}
+  <Field label="Mes">
+    <select value={edit.mes || ""} style={styles.input} disabled
+      title="El mes no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error.">
+      <option value="">{edit.mes ? MESES[Number(edit.mes)] : "—"}</option>
+    </select>
+  </Field>
 
-            <Field label="Año">
-              <input type="number" value={edit.anio || ""} onChange={(e) => setEdit({ ...edit, anio: e.target.value })} style={styles.input}/>
-            </Field>
+  {/* Año (solo lectura) */}
+  <Field label="Año">
+    <input
+      type="number"
+      value={edit.anio || ""}
+      style={styles.input}
+      disabled
+      title="El año no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error."
+    />
+  </Field>
 
-            <Field label="Recurrente">
-              <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
-                <input type="checkbox" checked={edit.es_recurrente} onChange={(e) => setEdit({ ...edit, es_recurrente: e.target.checked })}/>
-                Sí
-              </label>
-            </Field>
+  {/* Recurrente (editable) */}
+  <Field label="Recurrente">
+    <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
+      <input
+        type="checkbox"
+        checked={edit.es_recurrente}
+        onChange={(e) => setEdit({ ...edit, es_recurrente: e.target.checked })}
+      />
+      Sí
+    </label>
+  </Field>
 
-            <Field label="Forma de pago">
-              <select value={edit.fp_ui} onChange={(e) => setEdit({ ...edit, fp_ui: e.target.value })} style={styles.input}>
-                <option value={FP.EFECTIVO}>Efectivo</option>
-                <option value={FP.DEBITO}>Débito</option>
-                <option value={FP.CREDITO}>Crédito</option>
-              </select>
-            </Field>
+  {/* Forma de pago (editable) */}
+  <Field label="Forma de pago">
+    <select
+      value={edit.fp_ui}
+      onChange={(e) => setEdit({ ...edit, fp_ui: e.target.value })}
+      style={styles.input}
+    >
+      <option value={FP.EFECTIVO}>Efectivo</option>
+      <option value={FP.DEBITO}>Débito</option>
+      <option value={FP.CREDITO}>Crédito</option>
+    </select>
+  </Field>
 
-            <Field label="Tarjeta (si crédito)">
-              <select
-                value={edit.tarjeta_id}
-                onChange={(e) => setEdit({ ...edit, tarjeta_id: e.target.value })}
-                style={{ ...styles.input, opacity: edit.fp_ui === FP.CREDITO ? 1 : 0.5 }}
-                disabled={edit.fp_ui !== FP.CREDITO}
-                title={sel?.pagado ? "Si ya fue pagado en un período cerrado, el backend bloqueará cambios." : ""}
-              >
-                <option value="">Selecciona…</option>
-                {tarjetas.map((t) => (
-                  <option key={t.id} value={String(t.id)}>
-                    {t.nombre || t.banco || `Tarjeta ${t.id}`}
-                  </option>
-                ))}
-              </select>
-            </Field>
+  {/* Tarjeta si crédito (editable) */}
+  <Field label="Tarjeta (si crédito)">
+    <select
+      value={edit.tarjeta_id}
+      onChange={(e) => setEdit({ ...edit, tarjeta_id: e.target.value })}
+      style={{ ...styles.input, opacity: edit.fp_ui === FP.CREDITO ? 1 : 0.5 }}
+      disabled={edit.fp_ui !== FP.CREDITO}
+      title={sel?.pagado ? "Si ya fue pagado en un período cerrado, el backend bloqueará cambios." : ""}
+    >
+      <option value="">Selecciona…</option>
+      {tarjetas.map((t) => (
+        <option key={t.id} value={String(t.id)}>
+          {t.nombre || t.banco || `Tarjeta ${t.id}`}
+        </option>
+      ))}
+    </select>
+  </Field>
 
-            <button onClick={guardarEdicion} style={ui.btn}>Guardar cambios</button>
+  <button onClick={guardarEdicion} style={ui.btn}>Guardar cambios</button>
 
-            <button
-              onClick={eliminarSeleccionado}
-              style={{ ...ui.btn, background: sel?.pagado ? "#8a8f98" : "#ff3b30", cursor: sel?.pagado ? "not-allowed" : "pointer" }}
-              disabled={!!sel?.pagado}
-              title={sel?.pagado ? "Para eliminar, primero deshaz el pago (si el período no está cerrado)." : ""}
-            >
-              Eliminar
-            </button>
-          </div>
+  <button
+    onClick={eliminarSeleccionado}
+    style={{ ...ui.btn, background: sel?.pagado ? "#8a8f98" : "#ff3b30", cursor: sel?.pagado ? "not-allowed" : "pointer" }}
+    disabled={!!sel?.pagado}
+    title={sel?.pagado ? "Para eliminar, primero deshaz el pago (si el período no está cerrado)." : ""}
+  >
+    Eliminar
+  </button>
+</div>
+
 
           <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
             <button
