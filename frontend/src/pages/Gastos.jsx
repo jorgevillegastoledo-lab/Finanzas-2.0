@@ -42,25 +42,42 @@ function Field({ label, children, style }) {
 }
 
 /* ===========================
-   HELPERS DE PAGOS
+   HELPERS DE PAGOS / FECHAS
    =========================== */
-// Deriva "metodo" para pagos_gasto
 function metodoDesdeUI(fp_ui) {
   if (fp_ui === FP.CREDITO) return "credito";
   if (fp_ui === FP.DEBITO)  return "debito";
   return "efectivo";
 }
 
-// Usa el endpoint del backend: POST /gastos/:id/pagar
 async function crearPagoGastoAPI(payload) {
   try {
-    const { gasto_id, ...body } = payload; // el body NO lleva gasto_id
+    const { gasto_id, ...body } = payload;
     await api.post(`/gastos/${gasto_id}/pagar`, body);
     return { ok: true };
   } catch (e) {
     console.error("crearPagoGastoAPI /gastos/:id/pagar falló:", e?.response?.status, e?.response?.data);
     return { ok: false, err: e?.response?.data?.detail || "No pude registrar el pago." };
   }
+}
+
+// Último día del mes (mes 1..12)
+function endOfMonth(anio, mes) {
+  return new Date(anio, mes, 0);
+}
+// Fin de mes + 5 días
+function endOfMonthPlus5(anio, mes) {
+  const d = endOfMonth(anio, mes);
+  const r = new Date(d.getTime());
+  r.setDate(d.getDate() + 5);
+  r.setHours(23,59,59,999);
+  return r;
+}
+// ¿Se puede deshacer dentro de la ventana?
+function canUndoWindow(g) {
+  if (!g?.anio || !g?.mes) return false;
+  const limite = endOfMonthPlus5(Number(g.anio), Number(g.mes));
+  return new Date() <= limite;
 }
 
 // ---------------- Detalle Gasto (modal) ----------------
@@ -79,7 +96,7 @@ const emptyGastoDetalle = {
   garantia_meses: "",
   garantia_hasta: "",
   ubicacion: "",
-  tags: "",   // CSV en el UI; se convierte a array
+  tags: "",
   nota: "",
 };
 
@@ -91,6 +108,7 @@ export default function Gastos() {
   const [gastos, setGastos] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [pickerKey, setPickerKey] = useState(0);
 
   // Mes/Año por defecto = actuales
   const [fMes, setFMes] = useState(String(MES_ACTUAL));
@@ -106,19 +124,22 @@ export default function Gastos() {
 
   // --- Crear gasto ---
   const [nuevo, setNuevo] = useState({
-    nombre: "", // queda como compatibilidad, pero NO se usa para guardar
+    nombre: "",
     monto: "",
     mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL),
     pagado: false,
-    es_recurrente: false,         // DB
-    fp_ui: FP.EFECTIVO,           // UI interno
-    tarjeta_id: "",               // si crédito
+    es_recurrente: false,
+    fp_ui: FP.EFECTIVO,
+    tarjeta_id: "",
   });
-  const [nuevoConcepto, setNuevoConcepto] = useState(null); // {id,nombre,...} seleccionado
+  const [nuevoConcepto, setNuevoConcepto] = useState(null);
   const [savingNew, setSavingNew] = useState(false);
   
   // --- Selección y edición (panel inferior) ---
   const [sel, setSel] = useState(null);
+  const selRef = useRef(null);                 // 👈 para evitar closures obsoletos
+  useEffect(()=>{ selRef.current = sel; }, [sel]);
+
   const [edit, setEdit] = useState({
     nombre: "", monto: "", mes: "", anio: "", pagado: false,
     es_recurrente: false,
@@ -318,7 +339,9 @@ export default function Gastos() {
     } catch (e) { console.error(e); }
   }
 
-  async function loadGastos() {
+  // 👇 ahora acepta opciones; por defecto preserva selección
+  async function loadGastos(opts = { keepSelection: true }) {
+    const keepSelection = opts?.keepSelection ?? true;
     try {
       setErr(""); setLoading(true);
       if (!fMes || !fAnio) { setGastos([]); return; }
@@ -326,10 +349,14 @@ export default function Gastos() {
       const { data } = await api.get("/gastos", { params: { mes: Number(fMes), anio: Number(fAnio) } });
       let items = Array.isArray(data) ? data : (data?.data ?? []);
       if (fPagado) items = items.filter((g) => !!g.pagado);
+
+      // Orden por ID asc
+      items = [...items].sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
       setGastos(items);
 
-      if (sel) {
-        const keep = items.find((x) => x.id === sel.id);
+      // 👇 solo re-seleccionar si se pidió explícitamente
+      if (keepSelection && selRef.current) {
+        const keep = items.find((x) => x.id === selRef.current.id);
         setSel(keep || null);
       }
     } catch (e) {
@@ -338,84 +365,154 @@ export default function Gastos() {
   }
 
   // --- Crear ---
-  async function crearGasto(e) {
-    e?.preventDefault?.();
+   async function crearGasto(e) {
+  e?.preventDefault?.();
 
-    if (!nuevoConcepto || !nuevoConcepto.id) {
-      warning("Selecciona un concepto válido.");
-      return;
-    }
-    if (!nuevo.monto) {
-      warning("El monto es obligatorio.");
-      return;
-    }
-    if (nuevo.fp_ui === FP.CREDITO && !nuevo.tarjeta_id) {
-      warning("Selecciona una tarjeta para los gastos a crédito.");
-      return;
-    }
+  if (!nuevoConcepto || !nuevoConcepto.id) {
+    warning("Selecciona un concepto válido.");
+    return;
+  }
+  if (!nuevo.monto) {
+    warning("El monto es obligatorio.");
+    return;
+  }
+  if (nuevo.fp_ui === FP.CREDITO && !nuevo.tarjeta_id) {
+    warning("Selecciona una tarjeta para los gastos a crédito.");
+    return;
+  }
 
-    try {
-      setSavingNew(true);
-      await api.post("/gastos", {
-        // IMPORTANTES: relacionar al concepto (y mantener nombre por compatibilidad)
-        concepto_id: Number(nuevoConcepto.id),
-        nombre: nuevoConcepto.nombre,
+  try {
+    setSavingNew(true);
+    await api.post("/gastos", {
+      concepto_id: Number(nuevoConcepto.id),
+      nombre: nuevoConcepto.nombre,        // ok, no molesta
 
-        monto: Number(nuevo.monto),
-        mes: nuevo.mes ? Number(nuevo.mes) : null,
-        anio: nuevo.anio ? Number(nuevo.anio) : null,
-        pagado: Boolean(nuevo.pagado),
-        es_recurrente: Boolean(nuevo.es_recurrente),           // ← DB
-        con_tarjeta: nuevo.fp_ui === FP.CREDITO,               // ← DB
-        tarjeta_id: nuevo.fp_ui === FP.CREDITO ? Number(nuevo.tarjeta_id) : null, // ← DB
-      });
-      setNuevo({
-        nombre: "", monto: "", mes: String(MES_ACTUAL), anio: String(ANIO_ACTUAL), pagado: false,
-        es_recurrente: false, fp_ui: FP.EFECTIVO, tarjeta_id: "",
-      });
-      setNuevoConcepto(null);
-      await loadGastos();
-      success("Gasto creado");
-    } catch (e) {
-      error({ title: "No pude guardar el gasto", description: e?.response?.data?.detail || String(e) });
-    } finally { setSavingNew(false); }
+      monto: Number(nuevo.monto),
+      mes: nuevo.mes ? Number(nuevo.mes) : null,
+      anio: nuevo.anio ? Number(nuevo.anio) : null,
+      pagado: Boolean(nuevo.pagado),
+      es_recurrente: Boolean(nuevo.es_recurrente),
+      con_tarjeta: nuevo.fp_ui === FP.CREDITO,
+      tarjeta_id: nuevo.fp_ui === FP.CREDITO ? Number(nuevo.tarjeta_id) : null,
+    });
+
+    setNuevo({
+      nombre: "",
+      monto: "",
+      mes: String(MES_ACTUAL),
+      anio: String(ANIO_ACTUAL),
+      pagado: false,
+      es_recurrente: false,
+      fp_ui: FP.EFECTIVO,
+      tarjeta_id: "",
+    });
+    setNuevoConcepto(null);
+	setPickerKey(k => k + 1);  // 👈 fuerza limpiar el ConceptoPicker
+    await loadGastos();
+    success("Gasto creado");
+  } catch (e) {
+    let detail = e?.response?.data?.detail || String(e);
+    if (detail.includes("No se permiten gastos en períodos futuros")) {
+      detail = "No se pueden crear gastos en períodos futuros. Revisa el año/mes seleccionado.";
+    }
+    error({
+      title: "No pude guardar el gasto",
+      description: detail,
+    });
+	// 👇 limpiar campos también cuando falla
+    setNuevo(n => ({ ...n, monto: "" }));  // deja mes/año y demás igual
+    setNuevoConcepto(null);                 // limpia el ConceptoPicker
+    setPickerKey(k => k + 1);               // fuerza el remount del picker
+	
+  } finally {
+    setSavingNew(false);
+  }
+}
+
+
+  // Helper: restablecer filtros a mes/año actuales
+  function resetFiltros() {
+    setFMes(String(MES_ACTUAL));
+    setFAnio(String(ANIO_ACTUAL));
+    setFPagado(false);
+    setErr("");
+    setTimeout(loadGastos, 0);
+  }
+
+  // 👇 Helper centralizado: limpiar selección y colapsar panel tras acciones
+  async function resetAfterAction() {
+    setSel(null);
+    setMenu(m => ({ ...m, show:false, target:null }));
+    await loadGastos({ keepSelection: false }); // 👈 NO re-seleccionar
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   // --- Editar / eliminar / marcar pagado ---
   async function guardarEdicion() {
-    if (!sel) return;
-    if (edit.fp_ui === FP.CREDITO && !edit.tarjeta_id) {
-      warning("Selecciona una tarjeta para los gastos a crédito.");
-      return;
-    }
-    try {
-      await api.put(`/gastos/${sel.id}`, {
-        nombre: edit.nombre,
-        monto: Number(edit.monto || 0),
-        mes: edit.mes ? Number(edit.mes) : null,
-        anio: edit.anio ? Number(edit.anio) : null,
-        pagado: Boolean(edit.pagado), // el backend lo bloqueará si se intenta tocar 'pagado'
-        es_recurrente: Boolean(edit.es_recurrente),            // ← DB
-        con_tarjeta: edit.fp_ui === FP.CREDITO,                // ← DB
-        tarjeta_id: edit.fp_ui === FP.CREDITO ? Number(edit.tarjeta_id) : null, // ← DB
-      });
-      await loadGastos();
-      success("Cambios guardados");
-    } catch (e) {
-      const detail = e?.response?.data?.detail;
-      if (e?.response?.status === 409) {
-        error({ title: "Operación no permitida", description: detail || "Conflicto con el estado actual." });
-      } else {
-        error({ title: "No pude guardar cambios", description: detail || String(e) });
-      }
+  if (!sel) return;
+
+  if (edit.fp_ui === FP.CREDITO && !edit.tarjeta_id) {
+    warning("Selecciona una tarjeta para los gastos a crédito.");
+    return;
+  }
+
+  // Construir diferencias entre original (sel) y editado
+  const cambios = [];
+  if (Number(edit.monto || 0) !== Number(sel.monto || 0)) {
+    cambios.push(`Monto: ${fmtCLP(sel.monto)} → ${fmtCLP(edit.monto)}`);
+  }
+  if (Boolean(edit.es_recurrente) !== Boolean(sel.es_recurrente ?? sel.recurrente)) {
+    cambios.push(`Recurrente: ${sel.es_recurrente ? "Sí" : "No"} → ${edit.es_recurrente ? "Sí" : "No"}`);
+  }
+  const fpOrig = isCredito(sel) ? "Crédito" : "Efectivo/Débito";
+  const fpEdit = edit.fp_ui === FP.CREDITO ? "Crédito" : "Efectivo/Débito";
+  if (fpOrig !== fpEdit) {
+    cambios.push(`Forma de pago: ${fpOrig} → ${fpEdit}`);
+  }
+  const tOrig = sel.tarjeta_id ? labelTarjeta(sel) : "—";
+  const tEdit = edit.fp_ui === FP.CREDITO
+    ? (tarjetaNombreMap[String(edit.tarjeta_id)] || `Tarjeta ${edit.tarjeta_id}`)
+    : "—";
+  if (tOrig !== tEdit) {
+    cambios.push(`Tarjeta: ${tOrig} → ${tEdit}`);
+  }
+
+  const msgCambios = cambios.length > 0
+    ? "Cambios:\n" + cambios.join("\n")
+    : "No se detectan cambios significativos.";
+
+  const ok = await confirm({
+    title: "Confirmar cambios",
+    message: `¿Guardar cambios en el gasto ID ${sel.id} — ${sel.nombre}?\n\n${msgCambios}`,
+    confirmText: "Guardar",
+  });
+  if (!ok) return;
+
+  try {
+    await api.put(`/gastos/${sel.id}`, {
+      monto: Number(edit.monto || 0),
+      es_recurrente: Boolean(edit.es_recurrente),
+      con_tarjeta: edit.fp_ui === FP.CREDITO,
+      tarjeta_id: edit.fp_ui === FP.CREDITO ? Number(edit.tarjeta_id) : null,
+    });
+    success("Cambios guardados");
+    await resetAfterAction(); // colapsa panel y refresca
+  } catch (e) {
+    const detail = e?.response?.data?.detail;
+    if (e?.response?.status === 409) {
+      error({ title: "Operación no permitida", description: detail || "Conflicto con el estado actual." });
+    } else {
+      error({ title: "No pude guardar cambios", description: detail || String(e) });
     }
   }
+}
+
+
 
   async function eliminarSeleccionado() {
     if (!sel) return;
 
     if (sel.pagado) {
-      // coherencia UI con la regla backend
       error({ title: "No se puede eliminar", description: "Para eliminar, primero deshaz el pago (si el período no está cerrado)." });
       return;
     }
@@ -430,9 +527,8 @@ export default function Gastos() {
 
     try {
       await api.delete(`/gastos/${sel.id}`);
-      setSel(null);
-      await loadGastos();
       success("Gasto eliminado");
+      await resetAfterAction(); // 👈 colapsa panel
     } catch (e) {
       const detail = e?.response?.data?.detail;
       error({ title: "No pude eliminar", description: detail || String(e) });
@@ -443,7 +539,6 @@ export default function Gastos() {
     if (!sel) return;
     try {
       if (flag) {
-        // Usa lo que está en el panel de edición para forma de pago/tarjeta
         const fp_ui_sel = edit?.fp_ui || (isCredito(sel) ? FP.CREDITO : FP.EFECTIVO);
         const metodo = metodoDesdeUI(fp_ui_sel);
         const tarjetaId =
@@ -456,7 +551,6 @@ export default function Gastos() {
           return;
         }
 
-        // NUEVO: confirmación tipo Facturación Tarjetas
         const ok = await confirm({
           title: "Confirmar pago",
           message: `¿Marcar el gasto como pagado por ${fmtCLP(Number(sel.monto || 0))}?`,
@@ -469,7 +563,7 @@ export default function Gastos() {
           fecha: new Date().toISOString().slice(0,10),
           monto: Number(sel.monto || 0),
           metodo,               // "efectivo" | "debito" | "credito"
-          tarjeta_id: tarjetaId // null salvo crédito
+          tarjeta_id: tarjetaId
         };
 
         const res = await crearPagoGastoAPI(payloadPay);
@@ -479,7 +573,6 @@ export default function Gastos() {
         }
         success("Pago registrado");
       } else {
-        // Confirmación y llamada al endpoint de deshacer
         const ok = await confirm({
           title: "Deshacer pago",
           message: "Se eliminará el último registro de pago y el gasto quedará como NO pagado si no hay pagos restantes.",
@@ -492,7 +585,7 @@ export default function Gastos() {
         success("Se deshizo el pago");
       }
 
-      await loadGastos();
+      await resetAfterAction(); // 👈 colapsa panel tras pagar/deshacer
     } catch (e) {
       const detail = e?.response?.data?.detail;
       if (e?.response?.status === 409) {
@@ -503,17 +596,16 @@ export default function Gastos() {
     }
   }
 
-  // Helper: restablecer filtros a mes/año actuales
-  function resetFiltros() {
-    setFMes(String(MES_ACTUAL));
-    setFAnio(String(ANIO_ACTUAL));
-    setFPagado(false);
-    setErr("");
-    setTimeout(loadGastos, 0);
-  }
+  // ------ Derivados de UI ------
+  const sortedGastos = useMemo(() => {
+    return [...gastos].sort((a,b)=> (Number(a.id)||0) - (Number(b.id)||0));
+  }, [gastos]);
+
+  const isPaid = Boolean(sel?.pagado);
+  const undoAllowed = isPaid && canUndoWindow(sel);
 
   return (
-    <AppShell title="Gastos" actions={<button onClick={loadGastos} style={ui.btn}>Actualizar</button>}>
+    <AppShell title="Gastos" actions={<button onClick={()=>loadGastos()} style={ui.btn}>Actualizar</button>}>
 
       {/* Agregar gasto */}
       <div style={ui.card}>
@@ -530,6 +622,7 @@ export default function Gastos() {
         >
           <Field label="Concepto">
             <ConceptoPicker
+			  key={pickerKey}
               value={nuevoConcepto}
               onChange={setNuevoConcepto}
               placeholder="Escribe para buscar…"
@@ -654,7 +747,7 @@ export default function Gastos() {
           </div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={loadGastos} style={styles.smallBtn}>Aplicar</button>
+            <button onClick={()=>loadGastos()} style={styles.smallBtn}>Aplicar</button>
             <button onClick={resetFiltros} style={{ ...styles.smallBtn, background: "#8899aa" }}>Limpiar</button>
           </div>
         </div>
@@ -678,7 +771,7 @@ export default function Gastos() {
           <div>Cargando gastos…</div>
         ) : err ? (
           <div style={styles.error}>{err}</div>
-        ) : gastos.length === 0 ? (
+        ) : sortedGastos.length === 0 ? (
           <div style={{ opacity: 0.8 }}>
             {(!fMes || !fAnio) ? "Selecciona Mes y Año y presiona Aplicar." : "No hay gastos."}
           </div>
@@ -701,7 +794,7 @@ export default function Gastos() {
                     </tr>
                   </thead>
                   <tbody>
-                    {gastos.map((g) => {
+                    {sortedGastos.map((g) => {
                       const credito = isCredito(g);
                       const selected = sel?.id === g.id;
                       const esRec = Boolean(g.es_recurrente ?? g.recurrente);
@@ -773,107 +866,119 @@ export default function Gastos() {
           </div>
 
           <div
-  style={{
-    display: "grid",
-    gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto auto",
-    gap: 10,
-    alignItems: "end",
-  }}
->
-  {/* Concepto (solo lectura) */}
-  <Field label="Concepto">
-    <input
-      style={styles.input}
-      value={sel?.nombre || (sel?.concepto_id ? `Concepto #${sel.concepto_id}` : "")}
-      disabled
-      title="El concepto no se puede cambiar en edición. Si te equivocaste, elimina el gasto (si no está pagado) y créalo de nuevo."
-    />
-  </Field>
+            style={{
+              display: "grid",
+              gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr 1fr 1fr auto auto",
+              gap: 10,
+              alignItems: "end",
+            }}
+          >
+            {/* Concepto (solo lectura) */}
+            <Field label="Concepto">
+              <input
+                style={styles.input}
+                value={sel?.nombre || (sel?.concepto_id ? `Concepto #${sel.concepto_id}` : "")}
+                disabled
+                title="El concepto no se puede cambiar en edición. Si te equivocaste, elimina el gasto (si no está pagado) y créalo de nuevo."
+              />
+            </Field>
 
-  {/* Monto (editable) */}
-  <Field label="Monto">
-    <input
-      type="number"
-      value={edit.monto}
-      onChange={(e) => setEdit({ ...edit, monto: e.target.value })}
-      style={styles.input}
-    />
-  </Field>
+            {/* Monto (editable bloqueado si pagado) */}
+            <Field label="Monto">
+              <input
+                type="number"
+                value={edit.monto}
+                onChange={(e) => setEdit({ ...edit, monto: e.target.value })}
+                style={styles.input}
+                disabled={Boolean(sel?.pagado)}
+                title={sel?.pagado ? "Bloqueado: el gasto está pagado. Deshaz el pago para editar." : ""}
+              />
+            </Field>
 
-  {/* Mes (solo lectura) */}
-  <Field label="Mes">
-    <select value={edit.mes || ""} style={styles.input} disabled
-      title="El mes no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error.">
-      <option value="">{edit.mes ? MESES[Number(edit.mes)] : "—"}</option>
-    </select>
-  </Field>
+            {/* Mes (solo lectura) */}
+            <Field label="Mes">
+              <select value={edit.mes || ""} style={styles.input} disabled
+                title="El mes no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error.">
+                <option value="">{edit.mes ? MESES[Number(edit.mes)] : "—"}</option>
+              </select>
+            </Field>
 
-  {/* Año (solo lectura) */}
-  <Field label="Año">
-    <input
-      type="number"
-      value={edit.anio || ""}
-      style={styles.input}
-      disabled
-      title="El año no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error."
-    />
-  </Field>
+            {/* Año (solo lectura) */}
+            <Field label="Año">
+              <input
+                type="number"
+                value={edit.anio || ""}
+                style={styles.input}
+                disabled
+                title="El año no se puede cambiar en edición. Elimina y vuelve a crear el gasto si fue un error."
+              />
+            </Field>
 
-  {/* Recurrente (editable) */}
-  <Field label="Recurrente">
-    <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
-      <input
-        type="checkbox"
-        checked={edit.es_recurrente}
-        onChange={(e) => setEdit({ ...edit, es_recurrente: e.target.checked })}
-      />
-      Sí
-    </label>
-  </Field>
+            {/* Recurrente */}
+            <Field label="Recurrente">
+              <label style={{ display: "flex", alignItems: "center", gap: 8, height: 38 }}>
+                <input
+                  type="checkbox"
+                  checked={edit.es_recurrente}
+                  onChange={(e) => setEdit({ ...edit, es_recurrente: e.target.checked })}
+                  disabled={Boolean(sel?.pagado)}
+                  title={sel?.pagado ? "Bloqueado: el gasto está pagado. Deshaz el pago para editar." : ""}
+                />
+                Sí
+              </label>
+            </Field>
 
-  {/* Forma de pago (editable) */}
-  <Field label="Forma de pago">
-    <select
-      value={edit.fp_ui}
-      onChange={(e) => setEdit({ ...edit, fp_ui: e.target.value })}
-      style={styles.input}
-    >
-      <option value={FP.EFECTIVO}>Efectivo</option>
-      <option value={FP.DEBITO}>Débito</option>
-      <option value={FP.CREDITO}>Crédito</option>
-    </select>
-  </Field>
+            {/* Forma de pago */}
+            <Field label="Forma de pago">
+              <select
+                value={edit.fp_ui}
+                onChange={(e) => setEdit({ ...edit, fp_ui: e.target.value })}
+                style={styles.input}
+                disabled={Boolean(sel?.pagado)}
+                title={sel?.pagado ? "Bloqueado: el gasto está pagado. Deshaz el pago para editar." : ""}
+              >
+                <option value={FP.EFECTIVO}>Efectivo</option>
+                <option value={FP.DEBITO}>Débito</option>
+                <option value={FP.CREDITO}>Crédito</option>
+              </select>
+            </Field>
 
-  {/* Tarjeta si crédito (editable) */}
-  <Field label="Tarjeta (si crédito)">
-    <select
-      value={edit.tarjeta_id}
-      onChange={(e) => setEdit({ ...edit, tarjeta_id: e.target.value })}
-      style={{ ...styles.input, opacity: edit.fp_ui === FP.CREDITO ? 1 : 0.5 }}
-      disabled={edit.fp_ui !== FP.CREDITO}
-      title={sel?.pagado ? "Si ya fue pagado en un período cerrado, el backend bloqueará cambios." : ""}
-    >
-      <option value="">Selecciona…</option>
-      {tarjetas.map((t) => (
-        <option key={t.id} value={String(t.id)}>
-          {t.nombre || t.banco || `Tarjeta ${t.id}`}
-        </option>
-      ))}
-    </select>
-  </Field>
+            {/* Tarjeta si crédito */}
+            <Field label="Tarjeta (si crédito)">
+              <select
+                value={edit.tarjeta_id}
+                onChange={(e) => setEdit({ ...edit, tarjeta_id: e.target.value })}
+                style={{ ...styles.input, opacity: edit.fp_ui === FP.CREDITO ? 1 : 0.5 }}
+                disabled={edit.fp_ui !== FP.CREDITO || Boolean(sel?.pagado)}
+                title={sel?.pagado ? "Bloqueado: el gasto está pagado. Deshaz el pago para editar." : ""}
+              >
+                <option value="">Selecciona…</option>
+                {tarjetas.map((t) => (
+                  <option key={t.id} value={String(t.id)}>
+                    {t.nombre || t.banco || `Tarjeta ${t.id}`}
+                  </option>
+                ))}
+              </select>
+            </Field>
 
-  <button onClick={guardarEdicion} style={ui.btn}>Guardar cambios</button>
+            <button
+              onClick={guardarEdicion}
+              style={{ ...ui.btn, opacity: sel?.pagado ? 0.6 : 1, cursor: sel?.pagado ? "not-allowed" : "pointer" }}
+              disabled={Boolean(sel?.pagado)}
+              title={sel?.pagado ? "Para editar, primero deshaz el pago (si el período no está cerrado)." : ""}
+            >
+              Guardar cambios
+            </button>
 
-  <button
-    onClick={eliminarSeleccionado}
-    style={{ ...ui.btn, background: sel?.pagado ? "#8a8f98" : "#ff3b30", cursor: sel?.pagado ? "not-allowed" : "pointer" }}
-    disabled={!!sel?.pagado}
-    title={sel?.pagado ? "Para eliminar, primero deshaz el pago (si el período no está cerrado)." : ""}
-  >
-    Eliminar
-  </button>
-</div>
-
+            <button
+              onClick={eliminarSeleccionado}
+              style={{ ...ui.btn, background: sel?.pagado ? "#8a8f98" : "#ff3b30", cursor: sel?.pagado ? "not-allowed" : "pointer" }}
+              disabled={!!sel?.pagado}
+              title={sel?.pagado ? "Para eliminar, primero deshaz el pago (si el período no está cerrado)." : ""}
+            >
+              Eliminar
+            </button>
+          </div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
             <button
@@ -882,12 +987,18 @@ export default function Gastos() {
               style={{ ...ui.btn, background: "#1e90ff", opacity: sel?.pagado ? 0.6 : 1 }}
               title={sel?.pagado ? "Ya está pagado" : ""}
             >
-              {sel?.pagado ? "Ya pagado" : "Marcar pagado"}
+              {sel?.pagado ? "Ya pagado" 
+			  : `Marcar pagado (${fmtCLP(sel?.monto)})`}
             </button>
             <button
               onClick={() => marcarPagado(false)}
-              disabled={!sel?.pagado}
-              style={{ ...ui.btn, background: "#6c757d", opacity: !sel?.pagado ? 0.6 : 1 }}
+              disabled={!(sel && sel.pagado && canUndoWindow(sel))}
+              style={{ ...ui.btn, background: "#6c757d", opacity: !(sel && sel.pagado && canUndoWindow(sel)) ? 0.6 : 1, cursor: !(sel && sel.pagado && canUndoWindow(sel)) ? "not-allowed" : "pointer" }}
+              title={
+                sel?.pagado
+                  ? (canUndoWindow(sel) ? "Deshacer pago" : "Ventana cerrada: solo era posible hasta fin de mes + 5 días.")
+                  : "Aún no está pagado"
+              }
             >
               Deshacer pagado
             </button>
@@ -1020,6 +1131,9 @@ const styles = {
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
   modal:{ width:"min(1100px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
+
+
+
 
 
 

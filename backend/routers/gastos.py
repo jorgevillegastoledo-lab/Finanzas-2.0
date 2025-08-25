@@ -1,14 +1,14 @@
 # routers/gastos.py
 from __future__ import annotations
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, Optional
+from datetime import date, timedelta
+from typing import Optional
 from calendar import monthrange
 
 import psycopg2
 import psycopg2.extras
 from psycopg2 import sql
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from core.dbutils import (
     get_conn, _fix_json, get_columns, ensure_gasto_detalle_table,
@@ -22,9 +22,10 @@ _CIERRE_OFFSET_DIAS = 5
 
 def _is_period_closed(mes: int, anio: int, offset_dias: int = _CIERRE_OFFSET_DIAS) -> bool:
     try:
-        if not (1 <= int(mes) <= 12) or not (2000 <= int(anio) <= 2100):
+        m = int(mes); a = int(anio)
+        if not (1 <= m <= 12) or not (2000 <= a <= 2100):
             return False
-        last_day = date(int(anio), int(mes), monthrange(int(anio), int(mes))[1])
+        last_day = date(a, m, monthrange(a, m)[1])
         hoy = date.today()
         return hoy > (last_day + timedelta(days=offset_dias))
     except Exception:
@@ -50,16 +51,11 @@ class GastoIn(BaseModel):
     es_recurrente: Optional[bool] = None
 
 class GastoUpdate(BaseModel):
-    # NOTA: por diseño, estos tres NO se pueden editar por PUT
-    # concepto_id: Optional[int] = None
-    # mes: Optional[int] = Field(default=None, ge=1, le=12)
-    # anio: Optional[int] = Field(default=None, ge=2000, le=2100)
+    # NO se pueden editar: concepto_id, mes, anio, pagado
     monto: Optional[float] = None
     es_recurrente: Optional[bool] = None
     con_tarjeta: Optional[bool] = None
     tarjeta_id: Optional[int] = None
-    # pagado NO va por aquí
-    # pagado: Optional[bool] = None
 
 class GastoPagarIn(BaseModel):
     fecha: Optional[date] = None
@@ -75,18 +71,18 @@ def listar_gastos(
     anio: int = Query(..., ge=2000, le=2100),
 ):
     try:
-        ensure_recurrentes(mes, anio)
+        #ensure_recurrentes(mes, anio)
         conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
                 SELECT
                   g.*,
-                  c.nombre AS concepto_nombre   -- <- no pisamos g.nombre
+                  c.nombre AS concepto_nombre
                 FROM gastos g
                 LEFT JOIN conceptos c ON c.id = g.concepto_id
                 WHERE g.mes = %s AND g.anio = %s
-                ORDER BY g.id DESC;
+                ORDER BY g.id ASC;   -- 👈 ID ascendente
                 """,
                 (mes, anio),
             )
@@ -100,8 +96,16 @@ def listar_gastos(
 def crear_gasto(body: GastoIn):
     try:
         conn = get_conn()
+         #Aquí, al inicio de la lógica, antes de insertar
+        hoy = date.today()
+        if body.anio > hoy.year or (body.anio == hoy.year and body.mes > hoy.month):
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="No se permiten gastos en períodos futuros."
+            )
 
-        # 1) Traer el concepto y su nombre (FK + nombre NOT NULL en gastos)
+        # 1) Validar concepto
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT id, nombre FROM conceptos WHERE id = %s;", (body.concepto_id,))
             c = cur.fetchone()
@@ -112,15 +116,12 @@ def crear_gasto(body: GastoIn):
                 detail="Debes seleccionar un concepto válido (Maestros → Conceptos)."
             )
 
-        # 2) Armar datos a insertar: tomamos el payload permitido + nombre del maestro
+        # 2) Preparar insert
         cols_exist = get_columns(conn, "gastos")
         data = {k: v for k, v in body.dict().items() if k in cols_exist and v is not None}
 
-        # nombre es NOT NULL en la tabla, así que lo completamos desde conceptos
         if "nombre" in cols_exist:
             data["nombre"] = c["nombre"]
-
-        # pagado podría venir None -> default False
         if "pagado" in cols_exist and data.get("pagado") is None:
             data["pagado"] = False
 
@@ -145,7 +146,6 @@ def crear_gasto(body: GastoIn):
         return {"ok": True, "data": _fix_json([row])[0]}
 
     except psycopg2.errors.UniqueViolation:
-        # Violación de uq_gastos_concepto_mes_anio
         raise HTTPException(
             status_code=409,
             detail="Ya existe ese concepto para el mismo mes y año."
@@ -156,16 +156,14 @@ def crear_gasto(body: GastoIn):
             detail="El concepto o la tarjeta no existen. Revisa los datos."
         )
     except Exception as e:
-        # Otros errores (incluye not_null_violation si por alguna razón faltó 'nombre')
         raise HTTPException(500, f"Error al crear gasto: {e}")
-
 
 @router.put("/{id}")
 def editar_gasto(id: int, body: GastoUpdate):
     """
     Reglas:
       - NO permite tocar: concepto_id, mes, anio, pagado.
-      - Si el gasto ya está pagado y el período está cerrado => bloquear.
+      - Si el gasto ya está pagado => BLOQUEAR SIEMPRE (sin importar período).
       - Campos editables: monto, es_recurrente, con_tarjeta, tarjeta_id.
     """
     try:
@@ -178,14 +176,16 @@ def editar_gasto(id: int, body: GastoUpdate):
             conn.close()
             raise HTTPException(404, "Gasto no encontrado")
 
-        # Si ya está pagado y el período está cerrado => bloquear
-        if bool(current.get("pagado")) and _is_period_closed(int(current["mes"]), int(current["anio"])):
+        # 👇 Bloqueo total si está pagado (independiente del período)
+        if bool(current.get("pagado")):
             conn.close()
-            raise HTTPException(409, _msg_cierre(int(current["mes"]), int(current["anio"])))
+            raise HTTPException(
+                409,
+                "El gasto está pagado. Para editar, primero debes deshacer el pago."
+            )
 
         incoming = body.dict(exclude_unset=True)
 
-        # Filtrar a los únicos campos permitidos
         allowed = {"monto", "es_recurrente", "con_tarjeta", "tarjeta_id"}
         data = {k: v for k, v in incoming.items() if k in allowed}
 
@@ -239,15 +239,19 @@ def pagar_gasto(id: int, body: GastoPagarIn):
     try:
         conn = get_conn()
         ensure_pagos_gasto_table(conn)
+
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, monto, pagado, con_tarjeta, tarjeta_id
-                FROM gastos WHERE id = %s;
+                SELECT id, concepto_id, nombre, monto, mes, anio, pagado,
+                       es_recurrente, con_tarjeta, tarjeta_id
+                FROM gastos
+                WHERE id = %s;
                 """,
                 (id,),
             )
             gasto = cur.fetchone()
+
         if not gasto:
             conn.close()
             raise HTTPException(404, "Gasto no encontrado")
@@ -262,15 +266,53 @@ def pagar_gasto(id: int, body: GastoPagarIn):
         nota = body.nota
 
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Registrar pago
             cur.execute(
                 """
                 INSERT INTO pagos_gasto (gasto_id, fecha, monto, metodo, tarjeta_id, nota)
-                VALUES (%s, %s, %s, %s, %s, %s) RETURNING *;
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *;
                 """,
                 (id, fecha, monto, metodo, tarjeta_id, nota),
             )
-            _ = cur.fetchone()
             cur.execute("UPDATE gastos SET pagado = TRUE WHERE id = %s;", (id,))
+
+            # 👉 NUEVO: replicar sólo si es recurrente
+            if bool(gasto.get("es_recurrente")):
+                mes_actual = int(gasto["mes"])
+                anio_actual = int(gasto["anio"])
+                next_mes = 1 if mes_actual == 12 else mes_actual + 1
+                next_anio = anio_actual + 1 if mes_actual == 12 else anio_actual
+
+                # Evitar duplicado (mismo concepto en el mes siguiente)
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM gastos
+                    WHERE concepto_id = %s AND mes = %s AND anio = %s
+                    LIMIT 1;
+                    """,
+                    (gasto["concepto_id"], next_mes, next_anio),
+                )
+                exists = cur.fetchone()
+
+                if not exists:
+                    cur.execute(
+                        """
+                        INSERT INTO gastos
+                          (concepto_id, nombre, monto, mes, anio, pagado,
+                           es_recurrente, con_tarjeta, tarjeta_id)
+                        VALUES
+                          (%s, %s, %s, %s, %s, FALSE,
+                           TRUE, %s, %s);
+                        """,
+                        (
+                            gasto["concepto_id"], gasto["nombre"], gasto["monto"],
+                            next_mes, next_anio,
+                            gasto.get("con_tarjeta"), gasto.get("tarjeta_id"),
+                        ),
+                    )
+
         conn.commit()
         conn.close()
         return {"ok": True}
@@ -278,6 +320,7 @@ def pagar_gasto(id: int, body: GastoPagarIn):
         raise
     except Exception as e:
         raise HTTPException(500, f"Error al pagar gasto: {e}")
+
 
 @router.post("/{id}/deshacer")
 def deshacer_pago_gasto(id: int):
@@ -321,5 +364,4 @@ def deshacer_pago_gasto(id: int):
         raise
     except Exception as e:
         raise HTTPException(500, f"Error al deshacer pago: {e}")
-
 

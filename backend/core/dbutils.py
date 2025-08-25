@@ -4,6 +4,7 @@ import os, pathlib, logging
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from psycopg2.extras import RealDictCursor
 
 import psycopg2
 import psycopg2.extras
@@ -184,44 +185,89 @@ def ensure_tarjeta_detalle_table(conn):
             ON public.tarjeta_detalle (tarjeta_id);
         """)
 
-def ensure_recurrentes(mes: int, anio: int):
-    """Clona gastos recurrentes del mes anterior si no existen en el mes actual."""
+def ensure_recurrentes(mes: int, anio: int) -> None:
+    """
+    Replica al período (mes/año) actual los gastos recurrentes del período anterior
+    si aún no existen. Siempre usa concepto_id y solo 'es_recurrente'.
+    """
+    conn = get_conn()
+    inserted = 0
     try:
-        prev_mes  = 12 if mes == 1 else mes - 1
+        prev_mes = 12 if mes == 1 else mes - 1
         prev_anio = anio - 1 if mes == 1 else anio
-        conn = get_conn()
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO gastos (
-                    nombre, monto, con_tarjeta, tarjeta_id,
-                    es_recurrente, mes, anio, pagado
-                )
-                SELECT
-                    g.nombre,
-                    g.monto,
-                    COALESCE(g.con_tarjeta, FALSE),
-                    g.tarjeta_id,
-                    TRUE,
-                    %s, %s,
-                    FALSE
+
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Solo es_recurrente (la columna 'recurrente' ya no existe)
+            cur.execute(
+                """
+                SELECT g.id, g.concepto_id, g.nombre, g.monto,
+                       g.es_recurrente, g.con_tarjeta, g.tarjeta_id
                 FROM gastos g
-                WHERE g.es_recurrente = TRUE
-                  AND g.mes  = %s
-                  AND g.anio = %s
-                  AND NOT EXISTS (
-                      SELECT 1 FROM gastos t
-                      WHERE t.es_recurrente = TRUE
-                        AND t.nombre = g.nombre
-                        AND t.mes = %s AND t.anio = %s
-                  );
-            """, (mes, anio, prev_mes, prev_anio, mes, anio))
-        conn.commit()
-    except Exception:
-        if 'conn' in locals(): conn.rollback()
-        logging.getLogger("uvicorn.error").exception("ensure_recurrentes falló")
-        raise
+                WHERE g.mes = %s AND g.anio = %s
+                  AND COALESCE(g.es_recurrente, FALSE) = TRUE
+                """,
+                (prev_mes, prev_anio),
+            )
+            prev = cur.fetchall()
+
+            for r in prev:
+                # Resolver concepto_id si viene nulo por datos antiguos
+                concepto_id = r.get("concepto_id")
+                if not concepto_id:
+                    cur.execute(
+                        "SELECT id FROM conceptos WHERE UPPER(nombre)=UPPER(%s) LIMIT 1;",
+                        (r["nombre"],),
+                    )
+                    c = cur.fetchone()
+                    concepto_id = c["id"] if c else None
+                if not concepto_id:
+                    continue  # no replicar si no podemos determinar el concepto
+
+                # Evitar duplicados en el período destino
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM gastos
+                    WHERE mes = %s AND anio = %s
+                      AND concepto_id = %s
+                    LIMIT 1;
+                    """,
+                    (mes, anio, concepto_id),
+                )
+                if cur.fetchone():
+                    continue
+
+                # Insertar como pendiente en el período actual
+                cur.execute(
+                    """
+                    INSERT INTO gastos
+                      (concepto_id, nombre, monto, mes, anio, pagado,
+                       es_recurrente, con_tarjeta, tarjeta_id)
+                    VALUES
+                      (%s, %s, %s, %s, %s, FALSE,
+                       COALESCE(%s, FALSE), COALESCE(%s, FALSE), %s);
+                    """,
+                    (
+                        concepto_id,
+                        r["nombre"],
+                        r["monto"],
+                        mes,
+                        anio,
+                        r.get("es_recurrente"),
+                        r.get("con_tarjeta"),
+                        r.get("tarjeta_id"),
+                    ),
+                )
+                inserted += 1
+
+        if inserted:
+            conn.commit()
     finally:
-        if 'conn' in locals(): conn.close()
+        conn.close()
+ 
+
+
+       
 
 # --------------------------- Recompute préstamo ---------------------------
 def recompute_prestamo_totales(conn, prestamo_id: int):
