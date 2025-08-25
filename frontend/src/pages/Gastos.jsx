@@ -4,6 +4,8 @@ import AppShell, { ui } from "../components/AppShell";
 import api from "../api/api";
 import { useToast, useConfirm } from "../ui/notifications";
 import ConceptoPicker from "../components/ConceptoPicker";
+import ConceptoFinderModal from "../components/ConceptoFinderModal";
+
 
 const MESES = ["","Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 
@@ -103,6 +105,7 @@ const emptyGastoDetalle = {
 export default function Gastos() {
   const { success, error, warning } = useToast();
   const confirm = useConfirm();
+  const [finderOpen, setFinderOpen] = useState(false);
 
   // --- Estado de lista / filtros ---
   const [gastos, setGastos] = useState([]);
@@ -621,13 +624,24 @@ export default function Gastos() {
           }}
         >
           <Field label="Concepto">
-            <ConceptoPicker
-			  key={pickerKey}
-              value={nuevoConcepto}
-              onChange={setNuevoConcepto}
-              placeholder="Escribe para buscar…"
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8 }}>
+              <ConceptoPicker
+                key={pickerKey}
+                value={nuevoConcepto}
+                onChange={setNuevoConcepto}
+                placeholder="Escribe para buscar…"
             />
+            <button
+                type="button"
+                onClick={() => setFinderOpen(true)}
+                style={ui.btn}
+                title="Buscar concepto"
+            >
+                🔎 Buscar
+               </button>
+            </div>
           </Field>
+
 
           <Field label="Monto">
             <input
@@ -1086,6 +1100,13 @@ export default function Gastos() {
           </div>
         </div>
       )}
+	        <ConceptoFinderModal
+              open={finderOpen}
+              onClose={() => setFinderOpen(false)}
+              onPick={(c) => { setNuevoConcepto(c); setFinderOpen(false); }}
+              allowCreate={false}   // 👈 sin creación desde la lupa
+            />
+	  
     </AppShell>
   );
 }
@@ -1131,6 +1152,7 @@ const styles = {
   modalBackdrop:{ position:"fixed", inset:0, background:"rgba(0,0,0,.5)", zIndex:40, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
   modal:{ width:"min(1100px, 96vw)", background:"#0b1322", border:"1px solid #1f2a44", borderRadius:12, padding:16, boxShadow:"0 40px 120px rgba(0,0,0,.55)" },
 };
+
 
 
 

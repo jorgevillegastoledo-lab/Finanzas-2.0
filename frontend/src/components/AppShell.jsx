@@ -64,6 +64,13 @@ export default function AppShell({ title = "Panel", actions, children }) {
                   >
                     Bancos
                   </button>
+				  <button
+                    style={ui.dropdownItem}
+                    onClick={() => { setOpenAdmin(false); navigate("/admin/formaspago"); }}
+                  >
+                    Formas de pago
+                  </button>
+				  
                 </div>
               )}
             </div>

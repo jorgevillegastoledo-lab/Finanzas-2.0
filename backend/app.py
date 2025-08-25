@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routers import prestamos, gastos, tarjetas, facturas, health
 # 👇 NUEVO: importamos los routers de maestros
-from routers import conceptos, bancos
+from routers import conceptos, bancos, formas_pago
 
 app = FastAPI(title="Finanzas API")
 
@@ -25,6 +25,7 @@ app.include_router(facturas.router)
 # 👇 NUEVO: montamos los routers de maestros
 app.include_router(conceptos.router)
 app.include_router(bancos.router)
+app.include_router(formas_pago.router)
 
 @app.get("/")
 def root():

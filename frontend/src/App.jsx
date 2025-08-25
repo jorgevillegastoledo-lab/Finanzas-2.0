@@ -13,9 +13,10 @@ import Tarjetas from "./pages/Tarjetas";
 import Sueldo from "./pages/Sueldo";
 import FacturacionTarjetas from "./pages/FacturacionTarjetas";
 
-// NUEVO
+// Menu maestros
 import AdminConceptos from "./pages/AdminConceptos";
 import AdminBancos from "./pages/AdminBancos";
+import FormasPago from "./pages/FormasPago"; 
 
 export default function App() {
   return (
@@ -92,6 +93,15 @@ export default function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/admin/formaspago"
+          element={
+            <ProtectedRoute>
+              <FormasPago />
+            </ProtectedRoute>
+          }
+        />
+
 
         {/* Cualquier otra ruta → home */}
         <Route path="*" element={<Navigate to="/" replace />} />
